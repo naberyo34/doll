@@ -1,50 +1,133 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { LogicalSize } from "@tauri-apps/api/dpi";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useCallback, useEffect, useRef, useState } from "react";
+import neutralImage from "./assets/tama/neutral.png";
 import "./App.css";
 
-function App() {
-	const [greetMsg, setGreetMsg] = useState("");
-	const [name, setName] = useState("");
+/** Status pushed from the Rust backend via Tauri events. */
+interface OpenClawStatus {
+	status: "idle" | "responding";
+	emotion?: "happy" | "sad" | "angry" | "surprised" | "neutral";
+}
 
-	async function greet() {
-		// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-		setGreetMsg(await invoke("greet", { name }));
+const EMOTION_LABELS: Record<string, string> = {
+	happy: "😊 嬉しい",
+	sad: "😢 悲しい",
+	angry: "😠 怒り",
+	surprised: "😲 驚き",
+	neutral: "",
+};
+
+function statusToLabel(s: OpenClawStatus): string {
+	if (s.status === "responding" && s.emotion) {
+		return EMOTION_LABELS[s.emotion] ?? s.emotion;
 	}
+	return "";
+}
+
+/** Send a mock status event (for testing without OpenClaw). */
+function sendMock(status: string, emotion?: string) {
+	invoke("set_mock_status", { status, emotion }).catch(console.error);
+}
+
+/** Seconds to wait after the last status update before returning to idle. */
+const IDLE_TIMEOUT_SECS = 10;
+
+function App() {
+	const [status, setStatus] = useState<OpenClawStatus>({ status: "idle" });
+	const [menuOpen, setMenuOpen] = useState(false);
+	const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+	// Listen for status events from Rust backend
+	useEffect(() => {
+		const unlisten = listen<OpenClawStatus>("openclaw-status", (event) => {
+			setStatus(event.payload);
+
+			// Reset the idle timer on every incoming status update.
+			if (idleTimer.current) clearTimeout(idleTimer.current);
+			if (event.payload.status !== "idle") {
+				idleTimer.current = setTimeout(() => {
+					setStatus({ status: "idle" });
+				}, IDLE_TIMEOUT_SECS * 1000);
+			}
+		});
+		return () => {
+			unlisten.then((fn) => fn());
+			if (idleTimer.current) clearTimeout(idleTimer.current);
+		};
+	}, []);
+
+	// When the sprite image loads, resize the window to fit it
+	const handleImageLoad = useCallback(
+		(e: React.SyntheticEvent<HTMLImageElement>) => {
+			const img = e.currentTarget;
+			const w = img.clientWidth;
+			const h = img.clientHeight;
+			if (w > 0 && h > 0) {
+				getCurrentWindow().setSize(new LogicalSize(w, h));
+			}
+		},
+		[],
+	);
+
+	// Drag the window by mouse-down anywhere on the container
+	const handleMouseDown = useCallback(() => {
+		getCurrentWindow().startDragging();
+	}, []);
+
+	const label = statusToLabel(status);
 
 	return (
-		<main className="container">
-			<h1>Welcome to Tauri + React</h1>
+		<div
+			role="application"
+			className="mascot-container"
+			onMouseDown={handleMouseDown}
+		>
+			<img
+				className="mascot-image"
+				src={neutralImage}
+				alt="mascot"
+				onLoad={handleImageLoad}
+			/>
+			<span className={`status-label ${label ? "visible" : ""}`}>{label}</span>
 
-			<div className="row">
-				<a href="https://vite.dev" target="_blank" rel="noopener">
-					<img src="/vite.svg" className="logo vite" alt="Vite logo" />
-				</a>
-				<a href="https://tauri.app" target="_blank" rel="noopener">
-					<img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-				</a>
-				<a href="https://react.dev" target="_blank" rel="noopener">
-					<img src={reactLogo} className="logo react" alt="React logo" />
-				</a>
-			</div>
-			<p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-			<form
-				className="row"
-				onSubmit={(e) => {
-					e.preventDefault();
-					greet();
-				}}
+			{/* Menu toggle */}
+			<button
+				type="button"
+				className="menu-toggle"
+				onMouseDown={(e) => e.stopPropagation()}
+				onClick={() => setMenuOpen((v) => !v)}
+				title="メニュー"
 			>
-				<input
-					id="greet-input"
-					onChange={(e) => setName(e.currentTarget.value)}
-					placeholder="Enter a name..."
-				/>
-				<button type="submit">Greet</button>
-			</form>
-			<p>{greetMsg}</p>
-		</main>
+				⚙
+			</button>
+
+			{menuOpen && (
+				<fieldset
+					className="menu-panel"
+					onMouseDown={(e) => e.stopPropagation()}
+				>
+					<legend className="menu-legend">Mock Status</legend>
+					<button type="button" onClick={() => sendMock("responding", "happy")}>
+						happy
+					</button>
+					<button type="button" onClick={() => sendMock("responding", "sad")}>
+						sad
+					</button>
+					<button type="button" onClick={() => sendMock("responding", "angry")}>
+						angry
+					</button>
+					<button
+						type="button"
+						onClick={() => sendMock("responding", "surprised")}
+					>
+						surprised
+					</button>
+				</fieldset>
+			)}
+		</div>
 	);
 }
 
