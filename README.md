@@ -34,7 +34,18 @@ pnpm tauri dev
 
 OpenClaw の `SOUL.md` に以下を追記してください:
 
-> After every user-visible reply, send a background doll status notification to `http://127.0.0.1:3000/status` with an emotion (`happy|sad|angry|surprised|neutral`) that matches the reply tone.
+```md
+## Doll Integration
+
+After every user-visible reply, send a background doll status notification to `http://127.0.0.1:3000/status`.
+
+Payload format must be JSON with both fields:
+- `status`: always `"responding"`
+- `emotion`: one of `happy|sad|angry|surprised` matching the reply tone
+
+Example:
+- ✅ `{"status":"responding","emotion":"happy"}`
+```
 
 これにより、エージェントが回答するたびに `POST http://127.0.0.1:3000/status` で感情を通知し、doll の表情が連動します。
 
