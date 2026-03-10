@@ -3,6 +3,7 @@ mod skin;
 mod voisona;
 
 use axum::{extract::State, http::StatusCode, routing, Json, Router};
+use rand::prelude::IndexedRandom;
 use serde::{Deserialize, Serialize};
 use skin::SkinInfo;
 use std::path::PathBuf;
@@ -64,26 +65,31 @@ async fn handle_status(
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
-    if let Some(ref text) = payload.text {
-        if let Some(ref tts) = state.tts {
-            if !text.is_empty() {
-                let text = text.clone();
-                let tts = Arc::clone(tts);
-                let voice = state.skin_info.voice.clone();
-                let style_weights = payload.emotion.as_ref().and_then(|emo| {
-                    state
-                        .skin_info
-                        .emotions
-                        .iter()
-                        .find(|e| e.name == *emo)
-                        .and_then(|e| e.style_weights.clone())
-                });
-                tauri::async_runtime::spawn(async move {
-                    tts.synthesize(&text, voice.as_ref(), style_weights.as_deref())
-                        .await;
-                });
-            }
-        }
+    let tts_text = match payload.text.as_deref() {
+        Some(t) if !t.is_empty() => Some(t.to_string()),
+        _ if payload.emotion.as_deref() == Some("thinking") => state
+            .skin_info
+            .thinking_phrases
+            .choose(&mut rand::rng())
+            .cloned(),
+        _ => None,
+    };
+
+    if let (Some(text), Some(ref tts)) = (tts_text, &state.tts) {
+        let tts: Arc<VoisonaClient> = Arc::clone(tts);
+        let voice = state.skin_info.voice.clone();
+        let style_weights = payload.emotion.as_ref().and_then(|emo| {
+            state
+                .skin_info
+                .emotions
+                .iter()
+                .find(|e| e.name == *emo)
+                .and_then(|e| e.style_weights.clone())
+        });
+        tauri::async_runtime::spawn(async move {
+            tts.synthesize(&text, voice.as_ref(), style_weights.as_deref())
+                .await;
+        });
     }
 
     StatusCode::OK
@@ -91,7 +97,9 @@ async fn handle_status(
 
 /// Handles `GET /emotions` — returns the pre-serialised JSON list of available
 /// emotions for the currently active skin.
-async fn handle_emotions(State(state): State<AppState>) -> (StatusCode, [(&'static str, &'static str); 1], Vec<u8>) {
+async fn handle_emotions(
+    State(state): State<AppState>,
+) -> (StatusCode, [(&'static str, &'static str); 1], Vec<u8>) {
     (
         StatusCode::OK,
         [("content-type", "application/json")],
@@ -139,8 +147,8 @@ fn get_skin_image(
     skins_dir: tauri::State<'_, Arc<PathBuf>>,
 ) -> Result<tauri::ipc::Response, String> {
     let path = skin::resolve_image_path(&skins_dir, &skin_info.name, &emotion);
-    let bytes = std::fs::read(&path)
-        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let bytes =
+        std::fs::read(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -238,17 +246,15 @@ pub fn run() {
                 .expect("Cannot determine resource directory");
             skin::install_bundled_skins(&resource_dir, &setup_skins_dir);
 
-            let skin_info = skin::discover_skin(&setup_skins_dir, &setup_skin_name)
-                .unwrap_or_else(|| {
-                    log::warn!(
-                        "Skin '{}' not found; using empty fallback",
-                        setup_skin_name
-                    );
+            let skin_info =
+                skin::discover_skin(&setup_skins_dir, &setup_skin_name).unwrap_or_else(|| {
+                    log::warn!("Skin '{}' not found; using empty fallback", setup_skin_name);
                     SkinInfo {
                         name: setup_skin_name.clone(),
                         display_name: setup_skin_name.clone(),
                         emotions: Vec::new(),
                         voice: None,
+                        thinking_phrases: Vec::new(),
                     }
                 });
             log::info!(
@@ -257,8 +263,14 @@ pub fn run() {
                 skin_info.emotions.len()
             );
 
-            let emotions_json: Arc<[u8]> =
-                serde_json::to_vec(&skin_info.emotions).unwrap_or_default().into();
+            let agent_emotions: Vec<_> = skin_info
+                .emotions
+                .iter()
+                .filter(|e| e.name != "thinking")
+                .collect();
+            let emotions_json: Arc<[u8]> = serde_json::to_vec(&agent_emotions)
+                .unwrap_or_default()
+                .into();
 
             let skin_info = Arc::new(skin_info);
 

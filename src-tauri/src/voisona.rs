@@ -143,7 +143,10 @@ impl VoisonaClient {
         voice_override: Option<&VoiceOverride>,
         style_weights: Option<&[f64]>,
     ) {
-        if let Err(e) = self.synthesize_inner(text, voice_override, style_weights).await {
+        if let Err(e) = self
+            .synthesize_inner(text, voice_override, style_weights)
+            .await
+        {
             log::warn!("VoiSona TTS failed: {e}");
         }
     }
@@ -212,12 +215,9 @@ impl VoisonaClient {
             return Ok((lib.voice_name.clone(), lib.voice_version.clone(), lang));
         }
 
-        let lib = voices
-            .items
-            .first()
-            .ok_or_else(|| {
-                VoisonaError::VoiceNotFound("no voice libraries available".to_string())
-            })?;
+        let lib = voices.items.first().ok_or_else(|| {
+            VoisonaError::VoiceNotFound("no voice libraries available".to_string())
+        })?;
         let lang = lib
             .languages
             .first()
@@ -263,12 +263,9 @@ impl VoisonaClient {
             voice_name: voice.name.clone(),
             voice_version: voice.version.clone(),
             force_enqueue: true,
-            global_parameters: voice
-                .style_weights
-                .as_ref()
-                .map(|w| GlobalParameters {
-                    style_weights: w.clone(),
-                }),
+            global_parameters: voice.style_weights.as_ref().map(|w| GlobalParameters {
+                style_weights: w.clone(),
+            }),
         };
 
         let resp = self

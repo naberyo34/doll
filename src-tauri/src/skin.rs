@@ -15,6 +15,10 @@ struct SkinMeta {
     /// (`[emotions.happy] description = "desc" style_weights = [...]`).
     #[serde(default)]
     emotions: HashMap<String, EmotionValue>,
+    /// Phrases spoken via TTS when the agent enters the "thinking" state.
+    /// One phrase is chosen at random for each thinking event.
+    #[serde(default)]
+    thinking_phrases: Vec<String>,
 }
 
 /// Flexible deserialization for emotion entries in `skin.toml`.
@@ -87,6 +91,9 @@ pub struct SkinInfo {
     /// Per-skin voice library override for TTS.
     #[serde(skip_serializing)]
     pub voice: Option<VoiceOverride>,
+    /// Phrases spoken via TTS when the agent enters the "thinking" state.
+    #[serde(skip_serializing)]
+    pub thinking_phrases: Vec<String>,
 }
 
 /// Scans a skin directory and returns its info if valid.
@@ -116,9 +123,7 @@ pub fn discover_skin(skins_dir: &Path, name: &str) -> Option<SkinInfo> {
         SkinMeta::default()
     };
 
-    let display_name = meta
-        .display_name
-        .unwrap_or_else(|| name.to_string());
+    let display_name = meta.display_name.unwrap_or_else(|| name.to_string());
 
     let mut emotions = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -129,10 +134,7 @@ pub fn discover_skin(skins_dir: &Path, name: &str) -> Option<SkinInfo> {
                     if stem != "idle" {
                         let (description, style_weights) =
                             if let Some(val) = meta.emotions.get(stem) {
-                                (
-                                    val.description().to_string(),
-                                    val.style_weights().cloned(),
-                                )
+                                (val.description().to_string(), val.style_weights().cloned())
                             } else {
                                 (stem.to_string(), None)
                             };
@@ -153,6 +155,7 @@ pub fn discover_skin(skins_dir: &Path, name: &str) -> Option<SkinInfo> {
         display_name,
         emotions,
         voice: meta.voice,
+        thinking_phrases: meta.thinking_phrases,
     })
 }
 

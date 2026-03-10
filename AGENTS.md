@@ -49,7 +49,12 @@ src-tauri/              # バックエンド (Rust / Tauri)
 
 skills/
 └── doll/
-    └── SKILL.md        # OpenClaw 向け doll 連携スキル
+    └── SKILL.md        # OpenClaw 向け doll 連携スキル (エージェント駆動の感情通知)
+
+hooks/
+└── doll-notify/
+    ├── HOOK.md         # OpenClaw Hook メタデータ
+    └── handler.ts      # 思考状態の自動通知ハンドラ
 ```
 
 ---
@@ -79,9 +84,10 @@ OpenClaw エージェント
 ### データフロー
 
 1. **Rust** がアプリ起動時に HTTP サーバーを生成 (`setup` フック内)。
-2. **OpenClaw エージェント**が `doll` スキルの指示に従い、回答のたびにステータスを POST 送信。
-3. ハンドラが Tauri イベント `"openclaw-status"` を発火し、VoiSona Talk TTS を非同期で起動。
-4. **React** がイベントをリッスンし、キャッシュ済みの画像に切り替えてスプライトを更新。
+2. ユーザーがメッセージを送ると、**doll-notify Hook** が `message:preprocessed` で `emotion: "thinking"` を POST。バックエンドがスキンの `thinking_phrases` からランダムに 1 つ選んで TTS 再生。
+3. **OpenClaw エージェント**が `doll` スキルの指示に従い、回答のたびに感情 + テキストを POST 送信。Hook 側も `message:sent` でフォールバック通知を送る。
+4. ハンドラが Tauri イベント `"openclaw-status"` を発火し、VoiSona Talk TTS を非同期で起動。
+5. **React** がイベントをリッスンし、キャッシュ済みの画像に切り替えてスプライトを更新。
 
 ### HTTP プロトコル
 
@@ -92,15 +98,29 @@ OpenClaw エージェント
 
 > **アイドル遷移**: 最後のステータス更新から一定秒数 (`App.tsx` の `IDLE_TIMEOUT_SECS`) 経過すると、doll は自動的にアイドル状態に戻る。エージェントが明示的に `"idle"` を送る必要はない。
 
-### OpenClaw 連携 (Skill)
+### OpenClaw 連携 (Skill + Hook)
 
-OpenClaw との連携には `skills/doll/` に同梱された Skill を使う。シンボリックリンクでインストール:
+OpenClaw との連携は **Skill** と **Hook** の 2 層構成:
+
+- **Skill** (`skills/doll/`) — エージェントが応答時に感情を選んで POST する。感情選択の知性はこちらが担当。
+- **Hook** (`hooks/doll-notify/`) — Gateway レベルで `message:preprocessed` / `message:sent` を購読し、思考状態の通知とフォールバック通知を確実に発火する。
 
 ```bash
-ln -s /path/to/doll/skills/doll ~/.openclaw/skills/doll
+# シンボリックリンクはルート外を指すと拒否されるため cp を使う
+mkdir -p ~/.openclaw/skills ~/.openclaw/hooks
+cp -r /path/to/doll/skills/doll ~/.openclaw/skills/doll
+cp -r /path/to/doll/hooks/doll-notify ~/.openclaw/hooks/doll-notify
 ```
 
-Skill の内容は [`skills/doll/SKILL.md`](skills/doll/SKILL.md) を参照。
+インストール手順の詳細は [README.md](README.md) を参照。Skill の内容は [`skills/doll/SKILL.md`](skills/doll/SKILL.md)、Hook の内容は [`hooks/doll-notify/HOOK.md`](hooks/doll-notify/HOOK.md) を参照。
+
+### 思考状態 (Thinking)
+
+`thinking` は Hook が自動で発火する特殊な感情で、エージェントが選ぶものではない:
+
+- `GET /emotions` のレスポンスには含まれない (エージェントからは不可視)
+- `thinking.png` はスキンに含まれ、フロントエンドのプリロード対象
+- `skin.toml` の `thinking_phrases` にフレーズを `string[]` で定義すると、バックエンドがランダムに 1 つ選んで TTS 再生する
 
 ---
 
@@ -202,4 +222,4 @@ curl http://127.0.0.1:3000/emotions
 - **アニメーション強化**: 表情間のクロスフェードやスライドトランジション
 - **システムトレイ**: トレイアイコンに終了/設定メニューを追加
 - **ポート設定化**: コンパイル時定数ではなく設定ファイルから読み込む
-- **思考状態**: OpenClaw ゲートウェイのイベントストリームを監視し、エージェントの処理開始/終了を検知
+- **Hook のフォールバック感情推定**: `message:sent` Hook でデフォルト `"happy"` を送る代わりに、テキストから感情を推定する軽量ロジック
