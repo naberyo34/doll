@@ -6,7 +6,7 @@ interface OpenClawStatus {
 	emotion?: string;
 }
 
-const IDLE_TIMEOUT_SECS = 10;
+const IDLE_TIMEOUT_SECS = 30;
 
 export function useOpenClawStatus() {
 	const [status, setStatus] = useState<OpenClawStatus>({ status: "idle" });

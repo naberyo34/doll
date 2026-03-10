@@ -1,5 +1,5 @@
 display_name = "たま"
-thinking_phrases = ["ちょっと待っててね", "えーと", "考え中だよ"]
+thinking_phrases = ["ちょっと待っててね", "えーと", "うーん", "考え中だよ"]
 
 [voice]
 voice_name = "nurse-robot-type-t_ja_JP"
