@@ -4,8 +4,15 @@ use std::path::PathBuf;
 /// Top-level configuration loaded from `~/.config/doll/config.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AppConfig {
+    /// Active skin directory name (default: `"tama"`).
+    #[serde(default = "default_skin")]
+    pub skin: String,
     #[serde(default)]
     pub voisona: VoisonaConfig,
+}
+
+fn default_skin() -> String {
+    "tama".to_string()
 }
 
 /// VoiSona Talk REST API connection settings.
@@ -51,6 +58,8 @@ fn default_voisona_port() -> u16 {
 
 /// Template written to `config.toml` when the user opens it for the first time.
 pub const DEFAULT_TEMPLATE: &str = "\
+skin = \"tama\"
+
 [voisona]
 enabled = false
 port = 32766
@@ -60,17 +69,25 @@ password = \"\"
 # voice_version = \"\"
 ";
 
-/// Returns the path to the configuration file (`~/.config/doll/config.toml`).
+/// Returns the base doll config directory (`~/.config/doll/`).
 ///
-/// Uses `$XDG_CONFIG_HOME/doll/config.toml` when set, otherwise
-/// `~/.config/doll/config.toml` regardless of platform so the documented path
-/// works on macOS too (where `dirs::config_dir` would return
-/// `~/Library/Application Support`).
-pub fn config_path() -> Option<PathBuf> {
+/// Respects `$XDG_CONFIG_HOME` when set, otherwise uses `~/.config/doll`
+/// regardless of platform so the documented path works on macOS too.
+pub fn doll_dir() -> Option<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(xdg).join("doll").join("config.toml"));
+        return Some(PathBuf::from(xdg).join("doll"));
     }
-    dirs::home_dir().map(|h| h.join(".config").join("doll").join("config.toml"))
+    dirs::home_dir().map(|h| h.join(".config").join("doll"))
+}
+
+/// Returns the path to the configuration file (`~/.config/doll/config.toml`).
+pub fn config_path() -> Option<PathBuf> {
+    doll_dir().map(|d| d.join("config.toml"))
+}
+
+/// Returns the path to the skins directory (`~/.config/doll/skins/`).
+pub fn skins_dir() -> Option<PathBuf> {
+    doll_dir().map(|d| d.join("skins"))
 }
 
 /// Loads the application configuration from disk.

@@ -1,0 +1,8 @@
+display_name = "たま"
+
+[emotions]
+happy = "嬉しい・ポジティブな応答"
+sad = "悲しい・残念な応答"
+angry = "怒り・警告・不満"
+surprised = "驚き・予想外の発見"
+neutral = "普通・事実の説明・淡々とした応答"

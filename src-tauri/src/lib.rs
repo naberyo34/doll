@@ -1,11 +1,14 @@
 mod config;
+mod skin;
 mod voisona;
 
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{extract::State, http::StatusCode, routing, Json, Router};
 use config::VoisonaConfig;
 use serde::{Deserialize, Serialize};
+use skin::SkinInfo;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpListener;
 
 /// Status payload sent by the OpenClaw agent and forwarded to the frontend.
@@ -30,6 +33,7 @@ const DEFAULT_PORT: u16 = 3000;
 struct AppState {
     app: AppHandle,
     voisona: Arc<VoisonaConfig>,
+    skin_info: Arc<SkinInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,13 +49,11 @@ async fn handle_status(
 ) -> StatusCode {
     log::info!("Received status: {:?}", payload);
 
-    // Emit event to frontend (send only status + emotion, not the full text).
     if let Err(e) = state.app.emit("openclaw-status", &payload) {
         log::warn!("Failed to emit status event: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
-    // Fire-and-forget TTS when text is present and VoiSona is configured.
     if let Some(ref text) = payload.text {
         if state.voisona.enabled && !text.is_empty() {
             let text = text.clone();
@@ -65,14 +67,22 @@ async fn handle_status(
     StatusCode::OK
 }
 
+/// Handles `GET /emotions` — returns the cached list of available emotions
+/// (with descriptions) for the currently active skin.
+async fn handle_emotions(State(state): State<AppState>) -> Json<Vec<skin::EmotionEntry>> {
+    Json(state.skin_info.emotions.clone())
+}
+
 /// Starts the local HTTP server that OpenClaw pushes status updates to.
-///
-/// The server binds to `127.0.0.1:DEFAULT_PORT` and exposes a single
-/// endpoint: `POST /status`.
-async fn http_server(app: AppHandle, voisona: Arc<VoisonaConfig>) {
-    let state = AppState { app, voisona };
+async fn http_server(app: AppHandle, voisona: Arc<VoisonaConfig>, skin_info: Arc<SkinInfo>) {
+    let state = AppState {
+        app,
+        voisona,
+        skin_info,
+    };
     let router = Router::new()
-        .route("/status", post(handle_status))
+        .route("/status", routing::post(handle_status))
+        .route("/emotions", routing::get(handle_emotions))
         .with_state(state);
 
     let addr = format!("127.0.0.1:{DEFAULT_PORT}");
@@ -94,8 +104,26 @@ async fn http_server(app: AppHandle, voisona: Arc<VoisonaConfig>) {
 // Tauri commands
 // ---------------------------------------------------------------------------
 
+/// Returns cached information about the currently active skin.
+#[tauri::command]
+fn get_skin_info(skin_info: tauri::State<'_, Arc<SkinInfo>>) -> SkinInfo {
+    skin_info.as_ref().clone()
+}
+
+/// Returns the raw PNG bytes for an emotion of the active skin.
+#[tauri::command]
+fn get_skin_image(
+    emotion: String,
+    skin_info: tauri::State<'_, Arc<SkinInfo>>,
+    skins_dir: tauri::State<'_, Arc<PathBuf>>,
+) -> Result<tauri::ipc::Response, String> {
+    let path = skin::resolve_image_path(&skins_dir, &skin_info.name, &emotion);
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// Opens `~/.config/doll/config.toml` in the user's default text editor.
-/// Creates the file with a commented-out template when it does not yet exist.
 #[tauri::command]
 fn open_config_file() -> Result<(), String> {
     let path = config::config_path().ok_or("Cannot determine config directory")?;
@@ -108,11 +136,20 @@ fn open_config_file() -> Result<(), String> {
         log::info!("Created default config at {}", path.display());
     }
 
-    std::process::Command::new("open")
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
         .arg("-t")
         .arg(&path)
-        .spawn()
-        .map_err(|e| format!("Failed to open editor: {e}"))?;
+        .spawn();
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("xdg-open").arg(&path).spawn();
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("cmd")
+        .args(["/c", "start", ""])
+        .arg(&path)
+        .spawn();
+
+    status.map_err(|e| format!("Failed to open editor: {e}"))?;
 
     Ok(())
 }
@@ -126,20 +163,62 @@ fn open_config_file() -> Result<(), String> {
 pub fn run() {
     let app_config = config::load_config();
     let voisona_cfg = Arc::new(app_config.voisona);
+    let skin_name = app_config.skin;
+
+    let skins_dir = config::skins_dir().expect("Cannot determine skins directory");
+    let _ = std::fs::create_dir_all(&skins_dir);
+    let skins_dir = Arc::new(skins_dir);
 
     if voisona_cfg.enabled {
         log::info!("VoiSona TTS enabled (port {})", voisona_cfg.port);
     } else {
         log::info!("VoiSona TTS disabled");
     }
+    log::info!("Active skin: {}", skin_name);
+
+    let setup_skins_dir = Arc::clone(&skins_dir);
+    let setup_skin_name = skin_name.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![open_config_file])
+        .invoke_handler(tauri::generate_handler![
+            open_config_file,
+            get_skin_info,
+            get_skin_image,
+        ])
         .setup(move |app| {
+            let resource_dir = app
+                .path()
+                .resource_dir()
+                .expect("Cannot determine resource directory");
+            skin::install_bundled_skins(&resource_dir, &setup_skins_dir);
+
+            let skin_info = skin::discover_skin(&setup_skins_dir, &setup_skin_name)
+                .unwrap_or_else(|| {
+                    log::warn!(
+                        "Skin '{}' not found; using empty fallback",
+                        setup_skin_name
+                    );
+                    SkinInfo {
+                        name: setup_skin_name.clone(),
+                        display_name: setup_skin_name.clone(),
+                        emotions: Vec::new(),
+                    }
+                });
+            log::info!(
+                "Skin '{}' loaded with {} emotions",
+                skin_info.display_name,
+                skin_info.emotions.len()
+            );
+            let skin_info = Arc::new(skin_info);
+
+            app.manage(Arc::clone(&skin_info));
+            app.manage(Arc::clone(&setup_skins_dir));
+
             let handle = app.handle().clone();
             let cfg = Arc::clone(&voisona_cfg);
-            tauri::async_runtime::spawn(http_server(handle, cfg));
+            let si = Arc::clone(&skin_info);
+            tauri::async_runtime::spawn(http_server(handle, cfg, si));
             Ok(())
         })
         .run(tauri::generate_context!())
