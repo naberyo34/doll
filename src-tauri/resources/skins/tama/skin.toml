@@ -1,8 +1,25 @@
 display_name = "たま"
 
-[emotions]
-happy = "嬉しい・ポジティブな応答"
-sad = "悲しい・残念な応答"
-angry = "怒り・警告・不満"
-surprised = "驚き・予想外の発見"
-neutral = "普通・事実の説明・淡々とした応答"
+[voice]
+voice_name = "nurse-robot-type-t_ja_JP"
+
+# NurseRobot_TypeT styles: [Normal, Happy, Angry, Sad, Smol]
+[emotions.happy]
+description = "嬉しい・ポジティブな応答"
+style_weights = [0.0, 1.0, 0.0, 0.0, 0.0]
+
+[emotions.sad]
+description = "悲しい・残念な応答"
+style_weights = [0.0, 0.0, 0.0, 1.0, 0.0]
+
+[emotions.angry]
+description = "怒り・警告・不満"
+style_weights = [0.0, 0.0, 1.0, 0.0, 0.0]
+
+[emotions.surprised]
+description = "驚き・予想外の発見"
+style_weights = [0.2, 0.5, 0.0, 0.0, 0.3]
+
+[emotions.neutral]
+description = "普通・事実の説明・淡々とした応答"
+style_weights = [1.0, 0.0, 0.0, 0.0, 0.0]

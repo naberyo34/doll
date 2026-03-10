@@ -3,26 +3,34 @@ mod skin;
 mod voisona;
 
 use axum::{extract::State, http::StatusCode, routing, Json, Router};
-use config::VoisonaConfig;
 use serde::{Deserialize, Serialize};
 use skin::SkinInfo;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpListener;
+use voisona::VoisonaClient;
 
 /// Status payload sent by the OpenClaw agent and forwarded to the frontend.
-///
-/// - `status`: `"idle"` or `"responding"`
-/// - `emotion`: present when `status == "responding"`
-/// - `text`: optional reply text to be spoken via VoiSona Talk TTS
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenClawStatus {
-    status: String,
+    status: AgentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     emotion: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+}
+
+/// The lifecycle state reported by the OpenClaw agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum AgentStatus {
+    Idle,
+    Responding,
+    /// Catch-all for unknown values so unrecognised strings don't fail
+    /// deserialization. Serializes as `"unknown"`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Port on which doll listens for status updates from OpenClaw.
@@ -32,8 +40,10 @@ const DEFAULT_PORT: u16 = 3000;
 #[derive(Clone)]
 struct AppState {
     app: AppHandle,
-    voisona: Arc<VoisonaConfig>,
+    tts: Option<Arc<VoisonaClient>>,
     skin_info: Arc<SkinInfo>,
+    /// Pre-serialised JSON for `GET /emotions` to avoid repeated cloning.
+    emotions_json: Arc<[u8]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -55,31 +65,42 @@ async fn handle_status(
     }
 
     if let Some(ref text) = payload.text {
-        if state.voisona.enabled && !text.is_empty() {
-            let text = text.clone();
-            let cfg = Arc::clone(&state.voisona);
-            tauri::async_runtime::spawn(async move {
-                voisona::synthesize(&text, &cfg).await;
-            });
+        if let Some(ref tts) = state.tts {
+            if !text.is_empty() {
+                let text = text.clone();
+                let tts = Arc::clone(tts);
+                let voice = state.skin_info.voice.clone();
+                let style_weights = payload.emotion.as_ref().and_then(|emo| {
+                    state
+                        .skin_info
+                        .emotions
+                        .iter()
+                        .find(|e| e.name == *emo)
+                        .and_then(|e| e.style_weights.clone())
+                });
+                tauri::async_runtime::spawn(async move {
+                    tts.synthesize(&text, voice.as_ref(), style_weights.as_deref())
+                        .await;
+                });
+            }
         }
     }
 
     StatusCode::OK
 }
 
-/// Handles `GET /emotions` — returns the cached list of available emotions
-/// (with descriptions) for the currently active skin.
-async fn handle_emotions(State(state): State<AppState>) -> Json<Vec<skin::EmotionEntry>> {
-    Json(state.skin_info.emotions.clone())
+/// Handles `GET /emotions` — returns the pre-serialised JSON list of available
+/// emotions for the currently active skin.
+async fn handle_emotions(State(state): State<AppState>) -> (StatusCode, [(&'static str, &'static str); 1], Vec<u8>) {
+    (
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        state.emotions_json.to_vec(),
+    )
 }
 
 /// Starts the local HTTP server that OpenClaw pushes status updates to.
-async fn http_server(app: AppHandle, voisona: Arc<VoisonaConfig>, skin_info: Arc<SkinInfo>) {
-    let state = AppState {
-        app,
-        voisona,
-        skin_info,
-    };
+async fn http_server(state: AppState) {
     let router = Router::new()
         .route("/status", routing::post(handle_status))
         .route("/emotions", routing::get(handle_emotions))
@@ -123,6 +144,12 @@ fn get_skin_image(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Exits the application.
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 /// Opens `~/.config/doll/config.toml` in the user's default text editor.
 #[tauri::command]
 fn open_config_file() -> Result<(), String> {
@@ -137,19 +164,28 @@ fn open_config_file() -> Result<(), String> {
     }
 
     #[cfg(target_os = "macos")]
-    let status = std::process::Command::new("open")
-        .arg("-t")
-        .arg(&path)
-        .spawn();
+    {
+        std::process::Command::new("open")
+            .arg("-t")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open editor: {e}"))?;
+    }
     #[cfg(target_os = "linux")]
-    let status = std::process::Command::new("xdg-open").arg(&path).spawn();
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open editor: {e}"))?;
+    }
     #[cfg(target_os = "windows")]
-    let status = std::process::Command::new("cmd")
-        .args(["/c", "start", ""])
-        .arg(&path)
-        .spawn();
-
-    status.map_err(|e| format!("Failed to open editor: {e}"))?;
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", ""])
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open editor: {e}"))?;
+    }
 
     Ok(())
 }
@@ -162,18 +198,26 @@ fn open_config_file() -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_config = config::load_config();
-    let voisona_cfg = Arc::new(app_config.voisona);
     let skin_name = app_config.skin;
+
+    let tts = if app_config.voisona.enabled {
+        log::info!("VoiSona TTS enabled (port {})", app_config.voisona.port);
+        match VoisonaClient::new(app_config.voisona) {
+            Ok(client) => Some(Arc::new(client)),
+            Err(e) => {
+                log::warn!("Failed to initialise VoiSona client: {e}");
+                None
+            }
+        }
+    } else {
+        log::info!("VoiSona TTS disabled");
+        None
+    };
 
     let skins_dir = config::skins_dir().expect("Cannot determine skins directory");
     let _ = std::fs::create_dir_all(&skins_dir);
     let skins_dir = Arc::new(skins_dir);
 
-    if voisona_cfg.enabled {
-        log::info!("VoiSona TTS enabled (port {})", voisona_cfg.port);
-    } else {
-        log::info!("VoiSona TTS disabled");
-    }
     log::info!("Active skin: {}", skin_name);
 
     let setup_skins_dir = Arc::clone(&skins_dir);
@@ -183,6 +227,7 @@ pub fn run() {
         .plugin(tauri_plugin_log::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             open_config_file,
+            quit_app,
             get_skin_info,
             get_skin_image,
         ])
@@ -203,6 +248,7 @@ pub fn run() {
                         name: setup_skin_name.clone(),
                         display_name: setup_skin_name.clone(),
                         emotions: Vec::new(),
+                        voice: None,
                     }
                 });
             log::info!(
@@ -210,15 +256,22 @@ pub fn run() {
                 skin_info.display_name,
                 skin_info.emotions.len()
             );
+
+            let emotions_json: Arc<[u8]> =
+                serde_json::to_vec(&skin_info.emotions).unwrap_or_default().into();
+
             let skin_info = Arc::new(skin_info);
 
             app.manage(Arc::clone(&skin_info));
             app.manage(Arc::clone(&setup_skins_dir));
 
-            let handle = app.handle().clone();
-            let cfg = Arc::clone(&voisona_cfg);
-            let si = Arc::clone(&skin_info);
-            tauri::async_runtime::spawn(http_server(handle, cfg, si));
+            let state = AppState {
+                app: app.handle().clone(),
+                tts,
+                skin_info,
+                emotions_json,
+            };
+            tauri::async_runtime::spawn(http_server(state));
             Ok(())
         })
         .run(tauri::generate_context!())

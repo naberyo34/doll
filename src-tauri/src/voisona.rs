@@ -1,6 +1,8 @@
 use crate::config::VoisonaConfig;
+use crate::skin::VoiceOverride;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::time::Duration;
 
 /// Timeout for individual HTTP requests to VoiSona Talk.
@@ -11,6 +13,41 @@ const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Interval between synthesis status polls.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during VoiSona Talk TTS operations.
+#[derive(Debug)]
+pub enum VoisonaError {
+    /// Network or connection failure (potentially retryable).
+    Network(String),
+    /// Authentication or authorization failure.
+    Auth(String),
+    /// The requested voice library was not found.
+    VoiceNotFound(String),
+    /// Synthesis request was rejected or failed server-side.
+    Synthesis(String),
+    /// Synthesis did not complete within the timeout.
+    Timeout,
+}
+
+impl fmt::Display for VoisonaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VoisonaError::Network(msg) => write!(f, "network error: {msg}"),
+            VoisonaError::Auth(msg) => write!(f, "auth error: {msg}"),
+            VoisonaError::VoiceNotFound(msg) => write!(f, "voice not found: {msg}"),
+            VoisonaError::Synthesis(msg) => write!(f, "synthesis error: {msg}"),
+            VoisonaError::Timeout => write!(f, "synthesis timed out"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// API types
+// ---------------------------------------------------------------------------
 
 /// A voice library entry returned by `GET /api/talk/v1/voices`.
 #[derive(Debug, Deserialize)]
@@ -34,6 +71,14 @@ struct SynthesisRequest {
     voice_name: String,
     voice_version: String,
     force_enqueue: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    global_parameters: Option<GlobalParameters>,
+}
+
+/// Voice style parameters sent alongside a synthesis request.
+#[derive(Debug, Serialize)]
+struct GlobalParameters {
+    style_weights: Vec<f64>,
 }
 
 /// Response from a synthesis POST.
@@ -48,185 +93,267 @@ struct SynthesisStatus {
     state: String,
 }
 
-/// Synthesises `text` via VoiSona Talk and plays it through the default audio
-/// device. This function is designed to be called from a fire-and-forget
-/// `spawn`; errors are logged rather than propagated.
-pub async fn synthesize(text: &str, config: &VoisonaConfig) {
-    if let Err(e) = synthesize_inner(text, config).await {
-        log::warn!("VoiSona TTS failed: {e}");
-    }
+/// Resolved voice parameters ready to be sent in a synthesis request.
+struct ResolvedVoice {
+    name: String,
+    version: String,
+    language: String,
+    style_weights: Option<Vec<f64>>,
 }
 
-async fn synthesize_inner(text: &str, config: &VoisonaConfig) -> Result<(), String> {
-    let client = Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
+// ---------------------------------------------------------------------------
+// VoisonaClient
+// ---------------------------------------------------------------------------
 
-    let base = format!("http://localhost:{}/api/talk/v1/", config.port);
-
-    let (voice_name, voice_version, language) = resolve_voice(&client, &base, config).await?;
-
-    let uuid = request_synthesis(
-        &client,
-        &base,
-        config,
-        text,
-        &voice_name,
-        &voice_version,
-        &language,
-    )
-    .await?;
-
-    poll_until_done(&client, &base, config, &uuid).await?;
-
-    Ok(())
+/// Shared VoiSona Talk client that reuses the HTTP connection pool and caches
+/// the resolved voice library across requests.
+pub struct VoisonaClient {
+    client: Client,
+    config: VoisonaConfig,
+    base: String,
+    /// Caches the resolved (voice_name, voice_version, language) tuple so the
+    /// voices API is only queried once.
+    cached_voice: tokio::sync::OnceCell<(String, String, String)>,
 }
 
-/// Determines which voice library to use. If the config specifies one, uses
-/// that; otherwise queries VoiSona Talk and picks the first available library.
-async fn resolve_voice(
-    client: &Client,
-    base: &str,
-    config: &VoisonaConfig,
-) -> Result<(String, String, String), String> {
-    if !config.voice_name.is_empty() && !config.voice_version.is_empty() {
-        return Ok((
-            config.voice_name.clone(),
-            config.voice_version.clone(),
-            "ja_JP".to_string(),
-        ));
+impl VoisonaClient {
+    /// Creates a new client for the given configuration.
+    pub fn new(config: VoisonaConfig) -> Result<Self, String> {
+        let client = Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| format!("HTTP client error: {e}"))?;
+        let base = format!("http://localhost:{}/api/talk/v1/", config.port);
+        Ok(Self {
+            client,
+            config,
+            base,
+            cached_voice: tokio::sync::OnceCell::new(),
+        })
     }
 
-    let resp = client
-        .get(format!("{base}voices"))
-        .basic_auth(&config.username, Some(&config.password))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch voices: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!(
-            "VoiSona voices endpoint returned {}",
-            resp.status()
-        ));
+    /// Synthesises `text` and plays it through the default audio device.
+    /// Errors are logged rather than propagated.
+    ///
+    /// `voice_override` takes precedence over the global voice settings.
+    /// `style_weights`, when provided, controls the voice's emotional tone.
+    pub async fn synthesize(
+        &self,
+        text: &str,
+        voice_override: Option<&VoiceOverride>,
+        style_weights: Option<&[f64]>,
+    ) {
+        if let Err(e) = self.synthesize_inner(text, voice_override, style_weights).await {
+            log::warn!("VoiSona TTS failed: {e}");
+        }
     }
 
-    let voices: VoicesResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse voices response: {e}"))?;
+    async fn synthesize_inner(
+        &self,
+        text: &str,
+        voice_override: Option<&VoiceOverride>,
+        style_weights: Option<&[f64]>,
+    ) -> Result<(), VoisonaError> {
+        let (name, version, language) = self
+            .cached_voice
+            .get_or_try_init(|| self.resolve_voice(voice_override))
+            .await?;
 
-    let lib = voices
-        .items
-        .first()
-        .ok_or_else(|| "No voice libraries available in VoiSona Talk".to_string())?;
+        let voice = ResolvedVoice {
+            name: name.clone(),
+            version: version.clone(),
+            language: language.clone(),
+            style_weights: style_weights.map(|w| w.to_vec()),
+        };
 
-    let lang = lib
-        .languages
-        .first()
-        .cloned()
-        .unwrap_or("ja_JP".to_string());
-    Ok((lib.voice_name.clone(), lib.voice_version.clone(), lang))
-}
+        let uuid = self.request_synthesis(text, &voice).await?;
+        self.poll_until_done(&uuid).await?;
 
-/// Sends a synthesis request and returns the UUID.
-async fn request_synthesis(
-    client: &Client,
-    base: &str,
-    config: &VoisonaConfig,
-    text: &str,
-    voice_name: &str,
-    voice_version: &str,
-    language: &str,
-) -> Result<String, String> {
-    let payload = SynthesisRequest {
-        text: text.to_string(),
-        language: language.to_string(),
-        voice_name: voice_name.to_string(),
-        voice_version: voice_version.to_string(),
-        force_enqueue: true,
-    };
-
-    let resp = client
-        .post(format!("{base}speech-syntheses"))
-        .basic_auth(&config.username, Some(&config.password))
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("Synthesis request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Synthesis endpoint returned {}", resp.status()));
+        Ok(())
     }
 
-    let body: SynthesisResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse synthesis response: {e}"))?;
+    /// Determines which voice library to use.
+    ///
+    /// Priority: `voice_override` (skin) > `config` voice_name/version > API auto.
+    async fn resolve_voice(
+        &self,
+        voice_override: Option<&VoiceOverride>,
+    ) -> Result<(String, String, String), VoisonaError> {
+        let (want_name, want_version) = if let Some(ov) = voice_override {
+            (Some(ov.voice_name.as_str()), ov.voice_version.as_deref())
+        } else if !self.config.voice_name.is_empty() {
+            let ver = if self.config.voice_version.is_empty() {
+                None
+            } else {
+                Some(self.config.voice_version.as_str())
+            };
+            (Some(self.config.voice_name.as_str()), ver)
+        } else {
+            (None, None)
+        };
 
-    log::info!("VoiSona synthesis queued: {}", body.uuid);
-    Ok(body.uuid)
-}
-
-/// Polls the synthesis status until it reaches `"succeeded"` or times out.
-async fn poll_until_done(
-    client: &Client,
-    base: &str,
-    config: &VoisonaConfig,
-    uuid: &str,
-) -> Result<(), String> {
-    let start = tokio::time::Instant::now();
-
-    loop {
-        if start.elapsed() > SYNTHESIS_TIMEOUT {
-            let _ = delete_request(client, base, config, uuid).await;
-            return Err("Synthesis timed out".to_string());
+        if let (Some(name), Some(version)) = (want_name, want_version) {
+            return Ok((name.to_string(), version.to_string(), "ja_JP".to_string()));
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        let voices = self.fetch_voices().await?;
 
-        let resp = client
-            .get(format!("{base}speech-syntheses/{uuid}"))
-            .basic_auth(&config.username, Some(&config.password))
+        if let Some(name) = want_name {
+            let lib = voices
+                .items
+                .iter()
+                .find(|v| v.voice_name == name)
+                .ok_or_else(|| VoisonaError::VoiceNotFound(name.to_string()))?;
+            let lang = lib
+                .languages
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "ja_JP".to_string());
+            return Ok((lib.voice_name.clone(), lib.voice_version.clone(), lang));
+        }
+
+        let lib = voices
+            .items
+            .first()
+            .ok_or_else(|| {
+                VoisonaError::VoiceNotFound("no voice libraries available".to_string())
+            })?;
+        let lang = lib
+            .languages
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "ja_JP".to_string());
+        Ok((lib.voice_name.clone(), lib.voice_version.clone(), lang))
+    }
+
+    /// Fetches the list of available voice libraries from VoiSona Talk.
+    async fn fetch_voices(&self) -> Result<VoicesResponse, VoisonaError> {
+        let resp = self
+            .client
+            .get(format!("{}voices", self.base))
+            .basic_auth(&self.config.username, Some(&self.config.password))
             .send()
             .await
-            .map_err(|e| format!("Status poll failed: {e}"))?;
+            .map_err(|e| VoisonaError::Network(e.to_string()))?;
 
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(VoisonaError::Auth("invalid credentials".to_string()));
+        }
         if !resp.status().is_success() {
-            return Err(format!("Status poll returned {}", resp.status()));
+            return Err(VoisonaError::Network(format!(
+                "voices endpoint returned {}",
+                resp.status()
+            )));
         }
 
-        let status: SynthesisStatus = resp
+        resp.json()
+            .await
+            .map_err(|e| VoisonaError::Network(format!("failed to parse voices: {e}")))
+    }
+
+    /// Sends a synthesis request and returns the UUID.
+    async fn request_synthesis(
+        &self,
+        text: &str,
+        voice: &ResolvedVoice,
+    ) -> Result<String, VoisonaError> {
+        let payload = SynthesisRequest {
+            text: text.to_string(),
+            language: voice.language.clone(),
+            voice_name: voice.name.clone(),
+            voice_version: voice.version.clone(),
+            force_enqueue: true,
+            global_parameters: voice
+                .style_weights
+                .as_ref()
+                .map(|w| GlobalParameters {
+                    style_weights: w.clone(),
+                }),
+        };
+
+        let resp = self
+            .client
+            .post(format!("{}speech-syntheses", self.base))
+            .basic_auth(&self.config.username, Some(&self.config.password))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| VoisonaError::Network(e.to_string()))?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(VoisonaError::Auth("invalid credentials".to_string()));
+        }
+        if !resp.status().is_success() {
+            return Err(VoisonaError::Synthesis(format!(
+                "endpoint returned {}",
+                resp.status()
+            )));
+        }
+
+        let body: SynthesisResponse = resp
             .json()
             .await
-            .map_err(|e| format!("Failed to parse status: {e}"))?;
+            .map_err(|e| VoisonaError::Network(format!("failed to parse response: {e}")))?;
 
-        match status.state.as_str() {
-            "succeeded" => {
-                log::info!("VoiSona synthesis completed: {uuid}");
-                return Ok(());
+        log::info!("VoiSona synthesis queued: {}", body.uuid);
+        Ok(body.uuid)
+    }
+
+    /// Polls the synthesis status until it reaches `"succeeded"` or times out.
+    async fn poll_until_done(&self, uuid: &str) -> Result<(), VoisonaError> {
+        let start = tokio::time::Instant::now();
+
+        loop {
+            if start.elapsed() > SYNTHESIS_TIMEOUT {
+                let _ = self.delete_request(uuid).await;
+                return Err(VoisonaError::Timeout);
             }
-            "failed" => {
-                return Err(format!("Synthesis failed for {uuid}"));
+
+            tokio::time::sleep(POLL_INTERVAL).await;
+
+            let resp = self
+                .client
+                .get(format!("{}speech-syntheses/{uuid}", self.base))
+                .basic_auth(&self.config.username, Some(&self.config.password))
+                .send()
+                .await
+                .map_err(|e| VoisonaError::Network(e.to_string()))?;
+
+            if !resp.status().is_success() {
+                return Err(VoisonaError::Synthesis(format!(
+                    "status poll returned {}",
+                    resp.status()
+                )));
             }
-            _ => {}
+
+            let status: SynthesisStatus = resp
+                .json()
+                .await
+                .map_err(|e| VoisonaError::Network(format!("failed to parse status: {e}")))?;
+
+            match status.state.as_str() {
+                "succeeded" => {
+                    log::info!("VoiSona synthesis completed: {uuid}");
+                    return Ok(());
+                }
+                "failed" => {
+                    return Err(VoisonaError::Synthesis(format!(
+                        "synthesis failed for {uuid}"
+                    )));
+                }
+                _ => {}
+            }
         }
     }
-}
 
-/// Sends a DELETE request to clean up a synthesis entry.
-async fn delete_request(
-    client: &Client,
-    base: &str,
-    config: &VoisonaConfig,
-    uuid: &str,
-) -> Result<(), String> {
-    client
-        .delete(format!("{base}speech-syntheses/{uuid}"))
-        .basic_auth(&config.username, Some(&config.password))
-        .send()
-        .await
-        .map_err(|e| format!("Delete request failed: {e}"))?;
-    Ok(())
+    /// Sends a DELETE request to clean up a synthesis entry.
+    async fn delete_request(&self, uuid: &str) -> Result<(), VoisonaError> {
+        self.client
+            .delete(format!("{}speech-syntheses/{uuid}", self.base))
+            .basic_auth(&self.config.username, Some(&self.config.password))
+            .send()
+            .await
+            .map_err(|e| VoisonaError::Network(e.to_string()))?;
+        Ok(())
+    }
 }

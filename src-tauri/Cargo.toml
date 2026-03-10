@@ -15,7 +15,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
 axum = "0.8"
 log = "0.4"
 tauri-plugin-log = "2"

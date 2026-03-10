@@ -7,12 +7,61 @@ use std::path::{Path, PathBuf};
 struct SkinMeta {
     #[serde(default)]
     display_name: Option<String>,
-    /// Maps emotion name → description for the agent.
+    /// Per-skin voice library override for VoiSona Talk TTS.
     #[serde(default)]
-    emotions: HashMap<String, String>,
+    voice: Option<VoiceOverride>,
+    /// Maps emotion name → config (description + optional style weights).
+    /// Accepts both a plain string (`happy = "desc"`) and a detailed table
+    /// (`[emotions.happy] description = "desc" style_weights = [...]`).
+    #[serde(default)]
+    emotions: HashMap<String, EmotionValue>,
 }
 
-/// A single emotion entry with its name and optional description.
+/// Flexible deserialization for emotion entries in `skin.toml`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EmotionValue {
+    /// Short form: `happy = "嬉しい・ポジティブな応答"`
+    Simple(String),
+    /// Full form with optional VoiSona style weights.
+    Detailed {
+        description: String,
+        #[serde(default)]
+        style_weights: Option<Vec<f64>>,
+    },
+}
+
+impl EmotionValue {
+    fn description(&self) -> &str {
+        match self {
+            EmotionValue::Simple(s) => s,
+            EmotionValue::Detailed { description, .. } => description,
+        }
+    }
+
+    fn style_weights(&self) -> Option<&Vec<f64>> {
+        match self {
+            EmotionValue::Simple(_) => None,
+            EmotionValue::Detailed { style_weights, .. } => style_weights.as_ref(),
+        }
+    }
+}
+
+/// Per-skin voice library selection, defined in `skin.toml` under `[voice]`.
+///
+/// When present, overrides the global `[voisona]` voice settings in
+/// `config.toml` for this skin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceOverride {
+    /// VoiSona Talk voice library name (e.g. `"nurse-robot-type-t_ja_JP"`).
+    pub voice_name: String,
+    /// Voice library version. When omitted, resolved automatically via the
+    /// VoiSona Talk API.
+    #[serde(default)]
+    pub voice_version: Option<String>,
+}
+
+/// A single emotion entry with its name, description, and optional TTS style.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmotionEntry {
     /// Emotion key (matches the PNG filename without extension).
@@ -20,6 +69,10 @@ pub struct EmotionEntry {
     /// Human-readable description of when to use this emotion.
     /// Falls back to the emotion name when not specified in `skin.toml`.
     pub description: String,
+    /// VoiSona Talk style weights for this emotion. Sent as
+    /// `global_parameters.style_weights` in the synthesis request.
+    #[serde(skip_serializing)]
+    pub style_weights: Option<Vec<f64>>,
 }
 
 /// Information about a discovered skin, sent to the frontend and HTTP clients.
@@ -31,6 +84,9 @@ pub struct SkinInfo {
     pub display_name: String,
     /// Available emotions with descriptions (excluding `idle`).
     pub emotions: Vec<EmotionEntry>,
+    /// Per-skin voice library override for TTS.
+    #[serde(skip_serializing)]
+    pub voice: Option<VoiceOverride>,
 }
 
 /// Scans a skin directory and returns its info if valid.
@@ -42,16 +98,23 @@ pub fn discover_skin(skins_dir: &Path, name: &str) -> Option<SkinInfo> {
         return None;
     }
 
-    let meta = dir
-        .join("skin.toml")
-        .exists()
-        .then(|| {
-            std::fs::read_to_string(dir.join("skin.toml"))
-                .ok()
-                .and_then(|s| toml::from_str::<SkinMeta>(&s).ok())
-        })
-        .flatten()
-        .unwrap_or_default();
+    let meta = if dir.join("skin.toml").exists() {
+        match std::fs::read_to_string(dir.join("skin.toml")) {
+            Ok(contents) => match toml::from_str::<SkinMeta>(&contents) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!("Failed to parse {}/skin.toml: {e}", dir.display());
+                    SkinMeta::default()
+                }
+            },
+            Err(e) => {
+                log::warn!("Failed to read {}/skin.toml: {e}", dir.display());
+                SkinMeta::default()
+            }
+        }
+    } else {
+        SkinMeta::default()
+    };
 
     let display_name = meta
         .display_name
@@ -64,14 +127,19 @@ pub fn discover_skin(skins_dir: &Path, name: &str) -> Option<SkinInfo> {
             if path.extension().and_then(|e| e.to_str()) == Some("png") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     if stem != "idle" {
-                        let description = meta
-                            .emotions
-                            .get(stem)
-                            .cloned()
-                            .unwrap_or_else(|| stem.to_string());
+                        let (description, style_weights) =
+                            if let Some(val) = meta.emotions.get(stem) {
+                                (
+                                    val.description().to_string(),
+                                    val.style_weights().cloned(),
+                                )
+                            } else {
+                                (stem.to_string(), None)
+                            };
                         emotions.push(EmotionEntry {
                             name: stem.to_string(),
                             description,
+                            style_weights,
                         });
                     }
                 }
@@ -84,6 +152,7 @@ pub fn discover_skin(skins_dir: &Path, name: &str) -> Option<SkinInfo> {
         name: name.to_string(),
         display_name,
         emotions,
+        voice: meta.voice,
     })
 }
 
