@@ -63,7 +63,7 @@ Use the `description` to understand the intended use of each emotion, especially
 
 - Send the request **after** your reply, in the background. Do not let it block the response.
 - Pick `emotion` based on the overall tone of your reply. Use the list from `GET /emotions` to choose the best match. If no emotion fits well, any value is safe — doll will fall back to its idle expression for unrecognised emotions.
-- Keep `text` concise. If the reply is long, summarise the key point in one or two sentences rather than sending the entire response.
+- `text` は基本的に応答の本文をそのまま送る。ただしコードブロック、テーブル、長いリストなど音声読み上げに不向きな部分は省略してよい。内容を要約・言い換えする必要はない。
 - `text` 中の英語の固有名詞・技術用語はカタカナ読みに変換する (例: Cursor → カーソル、Docker → ドッカー、TypeScript → タイプスクリプト)。TTS エンジンは英単語をアルファベット読みしてしまうため。
 - If any request fails (connection refused, timeout, etc.), ignore the error silently. doll may not be running.
 

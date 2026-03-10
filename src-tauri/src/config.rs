@@ -5,7 +5,7 @@ use std::path::PathBuf;
 pub const DEFAULT_PORT: u16 = 3000;
 
 /// Top-level configuration loaded from `~/.config/doll/config.toml`.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     /// Active skin directory name (default: `"tama"`).
     #[serde(default = "default_skin")]
@@ -15,6 +15,21 @@ pub struct AppConfig {
     pub port: u16,
     #[serde(default)]
     pub voisona: VoisonaConfig,
+    /// OpenClaw agent name for `openclaw agent --agent <name>`.
+    /// When empty, doll omits the flag (requires only one agent configured).
+    #[serde(default)]
+    pub openclaw_agent: String,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            skin: default_skin(),
+            port: default_port(),
+            voisona: VoisonaConfig::default(),
+            openclaw_agent: String::new(),
+        }
+    }
 }
 
 fn default_skin() -> String {
@@ -70,6 +85,7 @@ fn default_voisona_port() -> u16 {
 pub const DEFAULT_TEMPLATE: &str = "\
 skin = \"tama\"
 port = 3000
+# openclaw_agent = \"\"
 
 [voisona]
 enabled = false

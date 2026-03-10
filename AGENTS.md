@@ -19,7 +19,7 @@
 
 ```
 src/                    # フロントエンド (React + TypeScript)
-├── App.tsx             # メインコンポーネント — スプライト表示、ドラッグ
+├── App.tsx             # メインコンポーネント — スプライト表示、ドラッグ、チャット UI
 ├── App.css             # 透明ウィンドウ用スタイル
 └── main.tsx            # React エントリーポイント
 
@@ -32,7 +32,10 @@ src-tauri/              # バックエンド (Rust / Tauri)
 │   └── default.json    # Tauri 権限設定
 └── src/
     ├── main.rs         # バイナリエントリーポイント
-    ├── lib.rs          # コアロジック: HTTP サーバー、Tauri イベントブリッジ、コンテキストメニュー
+    ├── lib.rs          # モジュール宣言 + アプリ組み立て (run())
+    ├── server.rs       # HTTP サーバー (axum)、ステータスハンドラ、TTS ヘルパー
+    ├── commands.rs     # Tauri コマンド (スキン取得、コンテキストメニュー、メッセージ送信)
+    ├── openclaw.rs     # OpenClaw Skill/Hook インストーラ
     ├── config.rs       # 設定ファイル読み込み (~/.config/doll/config.toml)
     ├── skin.rs         # スキンの検出・バリデーション・画像解決
     └── voisona.rs      # VoiSona Talk REST API クライアント (TTS)
@@ -52,12 +55,12 @@ hooks/
 ## アーキテクチャ
 
 ```
-OpenClaw エージェント
+OpenClaw エージェント / doll-notify Hook
        │
        │  GET  /emotions → 現在のスキンで使える感情一覧
        │  POST /status   → 感情 + テキストを通知
        ▼
-  Rust バックエンド (lib.rs)
+  Rust バックエンド (server.rs)
    ├─ HTTP サーバー (axum, 127.0.0.1:{port})
    ├─ POST /status   → Tauri イベント発火 + TTS 起動
    ├─ GET  /emotions → スキンの感情一覧を返す
@@ -68,7 +71,14 @@ OpenClaw エージェント
   React フロントエンド (App.tsx)
    ├─ listen("openclaw-status") → React ステートを更新
    ├─ invoke("get_skin_image")  → Tauri IPC で PNG バイナリを取得しキャッシュ
-   └─ 感情変化時にキャッシュから画像を切り替え
+   ├─ 感情変化時にキャッシュから画像を切り替え
+   │
+   │  マスコットクリック → チャット入力
+   │  invoke("send_message")
+   ▼
+  Rust コマンド (commands.rs)
+   ├─ self-POST /status → thinking 状態を発火 (server.rs と同じパスを通る)
+   └─ openclaw agent --message → CLI 経由でエージェントにメッセージ送信
 ```
 
 ### データフロー
@@ -79,12 +89,23 @@ OpenClaw エージェント
 4. ハンドラが Tauri イベント `"openclaw-status"` を発火し、VoiSona Talk TTS を非同期で起動。
 5. **React** がイベントをリッスンし、キャッシュ済みの画像に切り替えてスプライトを更新。
 
+### チャット機能 (ユーザー → エージェント)
+
+ユーザーがマスコットをクリックするとチャット入力欄が開き、`send_message` Tauri コマンドでメッセージを送信できる:
+
+1. **React** が `invoke("send_message", { text })` を呼ぶ。
+2. **`send_message`** (commands.rs) が自分自身の `POST /status` に `emotion: "thinking"` を送信。これにより通常の Hook 経由と同じコードパスで thinking 状態 + TTS が発火する。
+3. **`send_message`** が `openclaw agent --message <text>` を CLI で実行。`config.toml` の `openclaw_agent` が設定されている場合は `--agent <name>` フラグも付与。
+4. エージェントの応答は通常どおり Skill 経由で `POST /status` に届き、フロントエンドがチャットログに表示する。
+
+> **Note**: CLI 経由のため OpenClaw Gateway の Hook パイプライン (`message:preprocessed`) は通らない。thinking 状態は `send_message` 側で明示的に発火する。
+
 ### HTTP プロトコル
 
 エンドポイントの詳細 (フィールド、型、レスポンス形式) は以下を参照:
 
 - **OpenClaw 向け**: [`skills/doll/SKILL.md`](skills/doll/SKILL.md) — エージェントが従うべき手順とルール
-- **実装**: `src-tauri/src/lib.rs` — `handle_status()`, `handle_emotions()`
+- **実装**: `src-tauri/src/server.rs` — `handle_status()`, `handle_emotions()`
 
 > **アイドル遷移**: 最後のステータス更新から一定秒数 (`useOpenClawStatus.ts` の `IDLE_TIMEOUT_SECS`) 経過すると、doll は自動的にアイドル状態に戻る。エージェントが明示的に `"idle"` を送る必要はない。
 

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 interface OpenClawStatus {
 	status: "idle" | "responding";
 	emotion?: string;
+	text?: string;
 }
 
 const IDLE_TIMEOUT_SECS = 30;

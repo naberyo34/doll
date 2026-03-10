@@ -6,6 +6,7 @@ body {
 	background: transparent;
 	overflow: hidden;
 	user-select: none;
+	font-family: system-ui, -apple-system, sans-serif;
 }
 
 #root {
@@ -33,4 +34,83 @@ body {
 	object-fit: contain;
 	pointer-events: none;
 	transform-origin: bottom center;
+}
+
+/* Overlay strip at the bottom — speech bubble + chat input stacked */
+.overlay-strip {
+	position: absolute;
+	bottom: 4px;
+	left: 0;
+	right: 0;
+	margin-inline: auto;
+	width: 90%;
+	max-width: 360px;
+	z-index: 10;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+/* Chat log — scrollable list of recent messages */
+.chat-log {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	max-height: 50vh;
+	overflow-y: auto;
+	overflow-x: hidden;
+}
+
+.chat-entry {
+	background: rgba(0, 0, 0, 0.7);
+	backdrop-filter: blur(8px);
+	border-radius: 16px;
+	padding: 6px 12px;
+	box-sizing: border-box;
+	color: #fff;
+	font-size: 14px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-width: 90%;
+}
+
+.chat-entry p {
+	margin: 0;
+}
+
+.chat-entry--user {
+	align-self: flex-end;
+	background: rgba(59, 130, 246, 0.7);
+}
+
+.chat-entry--assistant {
+	align-self: flex-start;
+}
+
+/* Floating chat input bar */
+.chat-bar {
+	margin: 0;
+	padding: 0;
+}
+
+.chat-input {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 8px 12px;
+	border: none;
+	border-radius: 20px;
+	background: rgba(0, 0, 0, 0.7);
+	color: #fff;
+	font-size: 14px;
+	outline: none;
+	backdrop-filter: blur(8px);
+}
+
+.chat-input::placeholder {
+	color: rgba(255, 255, 255, 0.5);
+}
+
+.chat-input:disabled {
+	opacity: 0.5;
 }
