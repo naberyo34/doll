@@ -221,7 +221,7 @@ pub fn install_bundled_skins(resource_dir: &Path, skins_dir: &Path) {
     }
 }
 
-fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;

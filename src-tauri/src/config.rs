@@ -1,18 +1,28 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// Default HTTP server port for receiving OpenClaw status updates.
+pub const DEFAULT_PORT: u16 = 3000;
+
 /// Top-level configuration loaded from `~/.config/doll/config.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AppConfig {
     /// Active skin directory name (default: `"tama"`).
     #[serde(default = "default_skin")]
     pub skin: String,
+    /// HTTP server port (default: 3000).
+    #[serde(default = "default_port")]
+    pub port: u16,
     #[serde(default)]
     pub voisona: VoisonaConfig,
 }
 
 fn default_skin() -> String {
     "tama".to_string()
+}
+
+fn default_port() -> u16 {
+    DEFAULT_PORT
 }
 
 /// VoiSona Talk REST API connection settings.
@@ -59,6 +69,7 @@ fn default_voisona_port() -> u16 {
 /// Template written to `config.toml` when the user opens it for the first time.
 pub const DEFAULT_TEMPLATE: &str = "\
 skin = \"tama\"
+port = 3000
 
 [voisona]
 enabled = false

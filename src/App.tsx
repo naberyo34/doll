@@ -2,13 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { motion, useAnimate } from "motion/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect } from "react";
 import "./App.css";
 import { useOpenClawStatus } from "./hooks/useOpenClawStatus";
 import { useSkinLoader } from "./hooks/useSkinLoader";
 
 function App() {
-	const [menuOpen, setMenuOpen] = useState(false);
 	const [scope, animate] = useAnimate<HTMLImageElement>();
 
 	const playPoyo = useCallback(() => {
@@ -46,11 +45,17 @@ function App() {
 		getCurrentWindow().startDragging();
 	}, []);
 
+	const handleContextMenu = useCallback((e: React.MouseEvent) => {
+		e.preventDefault();
+		invoke("show_context_menu").catch(console.error);
+	}, []);
+
 	return (
 		<div
 			role="application"
 			className="mascot-container"
 			onMouseDown={handleMouseDown}
+			onContextMenu={handleContextMenu}
 		>
 			{imageUrl && (
 				<motion.div
@@ -73,33 +78,6 @@ function App() {
 						onLoad={handleImageLoad}
 					/>
 				</motion.div>
-			)}
-
-			<button
-				type="button"
-				className="menu-toggle"
-				onMouseDown={(e) => e.stopPropagation()}
-				onClick={() => setMenuOpen((v) => !v)}
-				title="メニュー"
-			>
-				⚙
-			</button>
-
-			{menuOpen && (
-				<nav className="menu-panel" onMouseDown={(e) => e.stopPropagation()}>
-					<button
-						type="button"
-						onClick={() => invoke("open_config_file").catch(console.error)}
-					>
-						設定ファイルを開く
-					</button>
-					<button
-						type="button"
-						onClick={() => invoke("quit_app").catch(console.error)}
-					>
-						終了する
-					</button>
-				</nav>
 			)}
 		</div>
 	);

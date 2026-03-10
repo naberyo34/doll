@@ -1,7 +1,7 @@
 ---
 name: doll-notify
-description: "Notify doll desktop mascot of thinking/responding state on every message"
-metadata: { "openclaw": { "emoji": "🎭", "events": ["message:preprocessed", "message:sent"] } }
+description: "Notify doll desktop mascot of thinking state when a message arrives"
+metadata: { "openclaw": { "emoji": "🎭", "events": ["message:preprocessed"] } }
 ---
 
 # doll-notify
@@ -11,11 +11,12 @@ Sends status updates to the [doll](https://github.com/naberyo34/doll) desktop ma
 ## What It Does
 
 - **`message:preprocessed`** — fires after the user's message is fully processed but before the agent starts thinking. Sends `emotion: "thinking"` so doll shows its thinking expression and speaks a random thinking phrase via TTS.
-- **`message:sent`** — fires after the agent responds. Sends `emotion: "happy"` (default) so doll returns to a responding expression.
+
+The responding emotion is handled by the [doll Skill](../../skills/doll/SKILL.md), which lets the agent choose the appropriate emotion for each reply.
 
 ## Requirements
 
-- doll must be running locally on `http://127.0.0.1:3000`.
+- doll must be running locally on `http://127.0.0.1:{port}` (default **3000**). The handler reads `~/.config/doll/config.toml` to discover a custom port automatically.
 - If doll is not running, errors are silently ignored.
 
 ## Installation

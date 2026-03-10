@@ -6,9 +6,11 @@ use axum::{extract::State, http::StatusCode, routing, Json, Router};
 use rand::prelude::IndexedRandom;
 use serde::{Deserialize, Serialize};
 use skin::SkinInfo;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tauri::menu::{Menu, MenuItem};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_dialog::DialogExt;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use voisona::VoisonaClient;
@@ -34,9 +36,6 @@ enum AgentStatus {
     #[serde(other)]
     Unknown,
 }
-
-/// Port on which doll listens for status updates from OpenClaw.
-const DEFAULT_PORT: u16 = 3000;
 
 /// Interval between repeated thinking TTS phrases.
 const THINKING_PHRASE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -173,13 +172,13 @@ async fn handle_emotions(
 }
 
 /// Starts the local HTTP server that OpenClaw pushes status updates to.
-async fn http_server(state: AppState) {
+async fn http_server(state: AppState, port: u16) {
     let router = Router::new()
         .route("/status", routing::post(handle_status))
         .route("/emotions", routing::get(handle_emotions))
         .with_state(state);
 
-    let addr = format!("127.0.0.1:{DEFAULT_PORT}");
+    let addr = format!("127.0.0.1:{port}");
     log::info!("doll HTTP server listening on {addr}");
 
     match TcpListener::bind(&addr).await {
@@ -217,14 +216,160 @@ fn get_skin_image(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-/// Exits the application.
+/// Shows a native context menu with app actions.
 #[tauri::command]
-fn quit_app(app: AppHandle) {
+async fn show_context_menu(window: tauri::WebviewWindow) -> Result<(), String> {
+    let app = window.app_handle();
+    let menu = Menu::with_items(
+        app,
+        &[
+            &MenuItem::with_id(
+                app,
+                "install_openclaw",
+                "OpenClaw 連携をインストール",
+                true,
+                None::<&str>,
+            )
+            .map_err(|e| e.to_string())?,
+            &MenuItem::with_id(app, "open_config", "設定ファイルを開く", true, None::<&str>)
+                .map_err(|e| e.to_string())?,
+            &MenuItem::with_id(app, "quit", "終了する", true, None::<&str>)
+                .map_err(|e| e.to_string())?,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    window.popup_menu(&menu).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// OpenClaw integration installer
+// ---------------------------------------------------------------------------
+
+/// Copies bundled Skill and Hook files to `~/.openclaw/` and updates
+/// `openclaw.json` to enable them.
+fn install_openclaw(resource_dir: &Path) -> Result<(), String> {
+    install_openclaw_files(resource_dir)?;
+    update_openclaw_config()?;
+    log::info!("OpenClaw integration installed successfully");
+    Ok(())
+}
+
+/// Copies `skills/doll/` and `hooks/doll-notify/` into `~/.openclaw/`.
+fn install_openclaw_files(resource_dir: &Path) -> Result<(), String> {
+    let openclaw_dir = dirs::home_dir()
+        .ok_or("Cannot determine home directory")?
+        .join(".openclaw");
+
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+
+    let skill_candidates = [
+        resource_dir.join("skills").join("doll"),
+        project_root.join("skills").join("doll"),
+    ];
+    let hook_candidates = [
+        resource_dir.join("hooks").join("doll-notify"),
+        project_root.join("hooks").join("doll-notify"),
+    ];
+
+    if let Some(src) = skill_candidates.iter().find(|p| p.is_dir()) {
+        let dest = openclaw_dir.join("skills").join("doll");
+        skin::copy_dir_recursive(src, &dest).map_err(|e| format!("Failed to copy skill: {e}"))?;
+        log::info!("Installed skill: {}", dest.display());
+    } else {
+        return Err("Bundled skill not found".to_string());
+    }
+
+    if let Some(src) = hook_candidates.iter().find(|p| p.is_dir()) {
+        let dest = openclaw_dir.join("hooks").join("doll-notify");
+        skin::copy_dir_recursive(src, &dest).map_err(|e| format!("Failed to copy hook: {e}"))?;
+        log::info!("Installed hook: {}", dest.display());
+    } else {
+        return Err("Bundled hook not found".to_string());
+    }
+
+    Ok(())
+}
+
+/// Merges doll entries into `~/.openclaw/openclaw.json`, preserving existing
+/// settings.
+fn update_openclaw_config() -> Result<(), String> {
+    let path = dirs::home_dir()
+        .ok_or("Cannot determine home directory")?
+        .join(".openclaw")
+        .join("openclaw.json");
+
+    let mut root: serde_json::Value = if path.exists() {
+        let contents = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&contents)
+            .map_err(|e| format!("Failed to parse openclaw.json: {e}"))?
+    } else {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        serde_json::json!({})
+    };
+
+    let obj = root
+        .as_object_mut()
+        .ok_or("openclaw.json is not an object")?;
+
+    // skills.entries.doll.enabled = true
+    obj.entry("skills")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("skills is not an object")?
+        .entry("entries")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("skills.entries is not an object")?
+        .entry("doll")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("skills.entries.doll is not an object")?
+        .entry("enabled")
+        .or_insert(serde_json::json!(true));
+
+    // hooks.internal.enabled = true, hooks.internal.entries.doll-notify.enabled = true
+    let internal = obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("hooks is not an object")?
+        .entry("internal")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("hooks.internal is not an object")?;
+
+    internal.entry("enabled").or_insert(serde_json::json!(true));
+
+    internal
+        .entry("entries")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("hooks.internal.entries is not an object")?
+        .entry("doll-notify")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("hooks.internal.entries.doll-notify is not an object")?
+        .entry("enabled")
+        .or_insert(serde_json::json!(true));
+
+    let json = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    log::info!("Updated openclaw.json at {}", path.display());
+
+    Ok(())
+}
+
+/// Exits the application.
+fn quit_app(app: &AppHandle) {
     app.exit(0);
 }
 
 /// Opens `~/.config/doll/config.toml` in the user's default text editor.
-#[tauri::command]
 fn open_config_file() -> Result<(), String> {
     let path = config::config_path().ok_or("Cannot determine config directory")?;
 
@@ -272,6 +417,7 @@ fn open_config_file() -> Result<(), String> {
 pub fn run() {
     let app_config = config::load_config();
     let skin_name = app_config.skin;
+    let port = app_config.port;
 
     let tts = if app_config.voisona.enabled {
         log::info!("VoiSona TTS enabled (port {})", app_config.voisona.port);
@@ -298,12 +444,42 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            open_config_file,
-            quit_app,
+            show_context_menu,
             get_skin_info,
             get_skin_image,
         ])
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "install_openclaw" => {
+                let resource_dir = app
+                    .path()
+                    .resource_dir()
+                    .expect("Cannot determine resource directory");
+                match install_openclaw(&resource_dir) {
+                    Ok(()) => {
+                        app.dialog()
+                            .message("OpenClaw 連携をインストールしました。\nGateway を再起動すると反映されます。")
+                            .title("doll")
+                            .blocking_show();
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to install OpenClaw integration: {e}");
+                        app.dialog()
+                            .message(format!("インストールに失敗しました:\n{e}"))
+                            .title("doll")
+                            .blocking_show();
+                    }
+                }
+            }
+            "open_config" => {
+                if let Err(e) = open_config_file() {
+                    log::warn!("Failed to open config: {e}");
+                }
+            }
+            "quit" => quit_app(app),
+            _ => {}
+        })
         .setup(move |app| {
             let resource_dir = app
                 .path()
@@ -349,7 +525,7 @@ pub fn run() {
                 emotions_json,
                 thinking_task: Arc::new(Mutex::new(None)),
             };
-            tauri::async_runtime::spawn(http_server(state));
+            tauri::async_runtime::spawn(http_server(state, port));
             Ok(())
         })
         .run(tauri::generate_context!())
