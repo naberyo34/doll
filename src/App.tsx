@@ -27,11 +27,6 @@ function statusToLabel(s: OpenClawStatus): string {
 	return "";
 }
 
-/** Send a mock status event (for testing without OpenClaw). */
-function sendMock(status: string, emotion?: string) {
-	invoke("set_mock_status", { status, emotion }).catch(console.error);
-}
-
 /** Seconds to wait after the last status update before returning to idle. */
 const IDLE_TIMEOUT_SECS = 10;
 
@@ -105,27 +100,17 @@ function App() {
 			</button>
 
 			{menuOpen && (
-				<fieldset
+				<div
 					className="menu-panel"
 					onMouseDown={(e) => e.stopPropagation()}
 				>
-					<legend className="menu-legend">Mock Status</legend>
-					<button type="button" onClick={() => sendMock("responding", "happy")}>
-						happy
-					</button>
-					<button type="button" onClick={() => sendMock("responding", "sad")}>
-						sad
-					</button>
-					<button type="button" onClick={() => sendMock("responding", "angry")}>
-						angry
-					</button>
 					<button
 						type="button"
-						onClick={() => sendMock("responding", "surprised")}
+						onClick={() => invoke("open_config_file").catch(console.error)}
 					>
-						surprised
+						設定ファイルを開く
 					</button>
-				</fieldset>
+				</div>
 			)}
 		</div>
 	);

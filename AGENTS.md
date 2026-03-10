@@ -42,7 +42,9 @@ src-tauri/              # Backend (Rust / Tauri)
 │   └── default.json    # Tauri permission grants (drag, resize, etc.)
 └── src/
     ├── main.rs         # Binary entry point
-    └── lib.rs          # Core logic: HTTP server, Tauri event bridge, mock command
+    ├── lib.rs          # Core logic: HTTP server, Tauri event bridge, mock command
+    ├── config.rs       # Configuration loading (~/.config/doll/config.toml)
+    └── voisona.rs      # VoiSona Talk REST API client for TTS
 ```
 
 ---
@@ -53,16 +55,18 @@ src-tauri/              # Backend (Rust / Tauri)
 OpenClaw Agent
        │
        │  exec: curl -X POST http://127.0.0.1:3000/status
-       │        -d '{"status":"responding","emotion":"happy"}'
+       │        -d '{"status":"responding","emotion":"happy","text":"..."}'
        ▼
   Rust backend (lib.rs)
    ├─ http_server()        — axum, listens on 127.0.0.1:3000
-   ├─ handle_status()      — POST /status → emits Tauri event
-   └─ set_mock_status()    — debug command for testing without OpenClaw
-       │
-       │  Tauri Event: "openclaw-status"
-       ▼
-  React frontend (App.tsx)
+   ├─ handle_status()      — POST /status → emits Tauri event + triggers TTS
+   ├─ set_mock_status()    — debug command for testing without OpenClaw
+   └─ voisona::synthesize() — forwards text to VoiSona Talk REST API
+       │                          │
+       │  Tauri Event:            │  HTTP: POST /api/talk/v1/speech-syntheses
+       │  "openclaw-status"       ▼
+       ▼                     VoiSona Talk (localhost:32766)
+  React frontend (App.tsx)    └─ plays audio on default device
    ├─ listen("openclaw-status")  — updates React state
    ├─ statusToLabel()            — maps emotion → display text
    └─ mascot-container           — renders sprite + text overlay
@@ -81,23 +85,28 @@ OpenClaw Agent
 OpenClaw sends JSON via `POST /status`:
 
 ```json
-{ "status": "responding", "emotion": "happy" }
+{ "status": "responding", "emotion": "happy", "text": "今日はいい天気ですね！" }
 ```
 
 | Field | Type | Values |
 |-------|------|--------|
 | `status` | string (required) | `"responding"` |
 | `emotion` | string (optional) | `"happy"`, `"sad"`, `"angry"`, `"surprised"`, `"neutral"` |
+| `text` | string (optional) | Reply text to be spoken via VoiSona Talk TTS |
 
 > **Idle transition**: doll automatically returns to idle after 10 seconds of inactivity (no new status updates). The agent does not need to send an explicit `"idle"` status.
+>
+> **TTS**: When `text` is present and VoiSona Talk is configured (see Configuration), doll forwards the text to VoiSona Talk for speech synthesis. The audio plays through the default audio device. If VoiSona Talk is unavailable, doll silently falls back to visual-only mode.
 
-### OpenClaw 連携 (SOUL.md)
+### OpenClaw 連携 (Skill)
 
-OpenClaw との連携には **skill ではなく `SOUL.md`** に以下の一文を追記します:
+OpenClaw との連携には `skills/doll/` に同梱された Skill を使います。シンボリックリンクでインストールします:
 
-> After every user-visible reply, send a background doll status notification to `http://127.0.0.1:3000/status` with an emotion (`happy|sad|angry|surprised|neutral`) that matches the reply tone.
+```bash
+ln -s /path/to/doll/skills/doll ~/.cursor/skills/doll
+```
 
-これにより、エージェントが回答するたびに doll へ感情通知が送られます。
+Skill の内容は [`skills/doll/SKILL.md`](skills/doll/SKILL.md) を参照してください。エージェントが回答するたびに doll へ感情通知と応答テキストが送られます。
 
 ---
 
@@ -129,10 +138,32 @@ Click the **⚙** icon in the top-right corner of the mascot window to open the 
 You can also test the HTTP endpoint directly:
 
 ```bash
+# Emotion only (visual)
 curl -X POST http://127.0.0.1:3000/status \
   -H "Content-Type: application/json" \
   -d '{"status":"responding","emotion":"happy"}'
+
+# Emotion + TTS (requires VoiSona Talk running and configured)
+curl -X POST http://127.0.0.1:3000/status \
+  -H "Content-Type: application/json" \
+  -d '{"status":"responding","emotion":"happy","text":"今日はいい天気ですね！"}'
 ```
+
+### Configuring VoiSona Talk TTS
+
+Edit `~/.config/doll/config.toml` (the file is created automatically on first launch):
+
+```toml
+[voisona]
+enabled = true
+port = 32766
+username = "your-email@example.com"
+password = "your-api-password"
+# voice_name = ""      # leave empty to auto-select
+# voice_version = ""
+```
+
+VoiSona Talk must be running with its REST API enabled. See the [VoiSona Talk REST API tutorial](https://manual.voisona.com/ja/talk/pc/2b6e9bc7efb180ea86ccc6c7347e9ca6) for setup instructions.
 
 ---
 
@@ -147,10 +178,15 @@ curl -X POST http://127.0.0.1:3000/status \
 
 ## Configuration
 
+All user-facing configuration is managed through `~/.config/doll/config.toml`. The file is created automatically with default values on first launch if it does not exist. Users can also open it from the in-app menu (⚙ → 設定ファイルを開く).
+
+When adding new configurable settings, add them to `config.toml` (and update `config.rs` + `DEFAULT_TEMPLATE`). Do not use compile-time constants, environment variables, or separate config files for user settings.
+
 | Setting | Location | Default |
 |---------|----------|---------|
-| HTTP server port | `src-tauri/src/lib.rs` → `DEFAULT_PORT` | `3000` |
-| Idle timeout | `src/App.tsx` → `IDLE_TIMEOUT_SECS` | `10` seconds |
+| VoiSona TTS | `~/.config/doll/config.toml` → `[voisona]` | disabled |
+| HTTP server port | `src-tauri/src/lib.rs` → `DEFAULT_PORT` (compile-time) | `3000` |
+| Idle timeout | `src/App.tsx` → `IDLE_TIMEOUT_SECS` (compile-time) | `10` seconds |
 | Window size | `src-tauri/tauri.conf.json` → `app.windows` | 400 × 600 |
 | Always on top | `src-tauri/tauri.conf.json` → `app.windows[0].alwaysOnTop` | `true` |
 
