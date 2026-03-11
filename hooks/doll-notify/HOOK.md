@@ -16,7 +16,8 @@ The responding emotion is handled by the [doll Skill](../../skills/doll/SKILL.md
 
 ## Requirements
 
-- doll must be running locally on `http://127.0.0.1:{port}` (default **3000**). The handler reads `~/.config/doll/config.toml` to discover a custom port automatically.
+- doll must be reachable at `http://{DOLL_HOST}:{DOLL_PORT}` (defaults: `127.0.0.1:3000`).
+- 環境変数 `DOLL_HOST` / `DOLL_PORT` で接続先を設定する。リモート環境では doll マシンの LAN IP を指定する。
 - If doll is not running, errors are silently ignored.
 
 ## Installation

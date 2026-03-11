@@ -14,11 +14,9 @@ pub struct AppConfig {
     #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default)]
-    pub voisona: VoisonaConfig,
-    /// OpenClaw agent name for `openclaw agent --agent <name>`.
-    /// When empty, doll omits the flag (requires only one agent configured).
+    pub openclaw: OpenClawConfig,
     #[serde(default)]
-    pub openclaw_agent: String,
+    pub voisona: VoisonaConfig,
 }
 
 impl Default for AppConfig {
@@ -26,9 +24,39 @@ impl Default for AppConfig {
         Self {
             skin: default_skin(),
             port: default_port(),
+            openclaw: OpenClawConfig::default(),
             voisona: VoisonaConfig::default(),
-            openclaw_agent: String::new(),
         }
+    }
+}
+
+/// OpenClaw connection settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OpenClawConfig {
+    /// Agent name for `openclaw agent --agent <name>` (local) or
+    /// `x-openclaw-agent-id` header (remote).
+    /// When empty, doll omits the flag / header.
+    #[serde(default)]
+    pub agent: String,
+    /// Remote OpenClaw Gateway URL (e.g. `http://192.168.1.100:18789`).
+    /// When empty (default), doll runs in local mode: it spawns `openclaw`
+    /// via the CLI and receives status updates on its local HTTP server.
+    /// When set, doll operates as a remote client using the Gateway's
+    /// `/v1/responses` endpoint.
+    #[serde(default)]
+    pub url: String,
+    /// Bearer token for Gateway authentication.
+    /// Required in remote mode. Corresponds to `OPENCLAW_GATEWAY_TOKEN` or
+    /// `gateway.auth.password` on the server side.
+    #[serde(default)]
+    pub token: String,
+}
+
+impl OpenClawConfig {
+    /// Returns `true` when doll is configured to connect to a remote OpenClaw
+    /// server rather than using the local CLI.
+    pub fn is_remote(&self) -> bool {
+        !self.url.is_empty()
     }
 }
 
@@ -46,6 +74,9 @@ pub struct VoisonaConfig {
     /// Whether TTS via VoiSona Talk is enabled.
     #[serde(default)]
     pub enabled: bool,
+    /// VoiSona Talk hostname (default: `"localhost"`).
+    #[serde(default = "default_voisona_host")]
+    pub host: String,
     /// VoiSona Talk REST API port (default: 32766).
     #[serde(default = "default_voisona_port")]
     pub port: u16,
@@ -68,6 +99,7 @@ impl Default for VoisonaConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            host: default_voisona_host(),
             port: default_voisona_port(),
             username: String::new(),
             password: String::new(),
@@ -75,6 +107,10 @@ impl Default for VoisonaConfig {
             voice_version: String::new(),
         }
     }
+}
+
+fn default_voisona_host() -> String {
+    "localhost".to_string()
 }
 
 fn default_voisona_port() -> u16 {
@@ -85,10 +121,18 @@ fn default_voisona_port() -> u16 {
 pub const DEFAULT_TEMPLATE: &str = "\
 skin = \"tama\"
 port = 3000
-# openclaw_agent = \"\"
+
+[openclaw]
+# agent = \"\"
+# Remote OpenClaw Gateway URL (e.g. http://192.168.1.100:18789).
+# When set, doll uses the Gateway /v1/responses API instead of the local CLI.
+# url = \"\"
+# Bearer token for Gateway authentication (required in remote mode).
+# token = \"\"
 
 [voisona]
 enabled = false
+host = \"localhost\"
 port = 32766
 username = \"\"
 password = \"\"

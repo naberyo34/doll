@@ -1,6 +1,6 @@
 # doll — 設計・リポジトリガイド
 
-**doll** は、ローカルで動作する [OpenClaw](https://github.com/anthropics/openclaw) AI エージェントの状態を可視化するデスクトップマスコットアプリです。ユーザー向けの機能概要・セットアップ手順・スキンの使い方は [README.md](README.md) を参照。
+**doll** は、[OpenClaw](https://github.com/openclaw/openclaw) AI エージェントの状態を可視化するデスクトップマスコットアプリです。ローカル CLI 経由でもリモートサーバー経由でも動作します。ユーザー向けの機能概要・セットアップ手順・スキンの使い方は [README.md](README.md) を参照。
 
 ---
 
@@ -57,28 +57,19 @@ hooks/
 ```
 OpenClaw エージェント / doll-notify Hook
        │
-       │  GET  /emotions → 現在のスキンで使える感情一覧
-       │  POST /status   → 感情 + テキストを通知
+       │  HTTP (POST /status, GET /emotions)
        ▼
-  Rust バックエンド (server.rs)
-   ├─ HTTP サーバー (axum, 127.0.0.1:{port})
-   ├─ POST /status   → Tauri イベント発火 + TTS 起動
-   ├─ GET  /emotions → スキンの感情一覧を返す
-   └─ voisona.rs     → VoiSona Talk REST API で音声合成
+  Rust バックエンド (server.rs, commands.rs)
+   ├─ HTTP サーバー → ステータス受信 + Tauri イベント発火 + TTS
+   ├─ send_message  → thinking 発火 + エージェントへメッセージ送信
+   └─ voisona.rs    → VoiSona Talk 音声合成
        │
-       │  Tauri イベント: "openclaw-status"
+       │  Tauri イベント
        ▼
   React フロントエンド (App.tsx)
-   ├─ listen("openclaw-status") → React ステートを更新
-   ├─ invoke("get_skin_image")  → Tauri IPC で PNG バイナリを取得しキャッシュ
-   ├─ 感情変化時にキャッシュから画像を切り替え
-   │
-   │  マスコットクリック → チャット入力
-   │  invoke("send_message")
-   ▼
-  Rust コマンド (commands.rs)
-   ├─ self-POST /status → thinking 状態を発火 (server.rs と同じパスを通る)
-   └─ openclaw agent --message → CLI 経由でエージェントにメッセージ送信
+   ├─ ステータスイベントで React ステートを更新
+   ├─ スキン画像をプリロード・キャッシュし、感情に応じて切り替え
+   └─ チャット入力 → invoke("send_message")
 ```
 
 ### データフロー
@@ -91,12 +82,14 @@ OpenClaw エージェント / doll-notify Hook
 
 ### チャット機能 (ユーザー → エージェント)
 
-ユーザーがマスコットをクリックするとチャット入力欄が開き、`send_message` Tauri コマンドでメッセージを送信できる:
+ユーザーがマスコットをクリックするとチャット入力欄が開き、`send_message` Tauri コマンドでメッセージを送信できる。
 
-1. **React** が `invoke("send_message", { text })` を呼ぶ。
-2. **`send_message`** (commands.rs) が自分自身の `POST /status` に `emotion: "thinking"` を送信。これにより通常の Hook 経由と同じコードパスで thinking 状態 + TTS が発火する。
-3. **`send_message`** が `openclaw agent --message <text>` を CLI で実行。`config.toml` の `openclaw_agent` が設定されている場合は `--agent <name>` フラグも付与。
-4. エージェントの応答は通常どおり Skill 経由で `POST /status` に届き、フロントエンドがチャットログに表示する。
+1. フロントエンドが `invoke("send_message")` を呼ぶ。
+2. バックエンドが thinking 状態 + TTS を直接発火する。
+3. ローカルモードでは CLI (`openclaw agent`)、リモートモードでは Gateway `POST /v1/responses` でエージェントにメッセージを送信する。
+4. エージェントの応答は Skill 経由で `POST /status` に届き、フロントエンドに反映される。
+
+実装の詳細は `commands.rs` の `send_message` を参照。ローカル/リモートの切り替えは `config.rs` の `OpenClawConfig` で行う。
 
 > **Note**: CLI 経由のため OpenClaw Gateway の Hook パイプライン (`message:preprocessed`) は通らない。thinking 状態は `send_message` 側で明示的に発火する。
 

@@ -9,22 +9,19 @@ metadata: {"openclaw":{"always":true}}
 
 After every user-visible reply, send a background HTTP request to notify the doll desktop mascot of your emotion and reply text.
 
-## Discovering the port
+## Discovering the host and port
 
-doll listens on `127.0.0.1` (default port **3000**). The user may configure a custom port in `~/.config/doll/config.toml` (respects `$XDG_CONFIG_HOME`):
+doll listens on a configurable host and port. Read from environment variables:
 
-```toml
-port = 3000
-```
-
-At the start of a session, read the config file and look for the top-level `port` value. If the file does not exist or the key is absent, use **3000**.
+- `DOLL_HOST` — the address to reach doll (default `127.0.0.1`)
+- `DOLL_PORT` — the HTTP server port (default `3000`)
 
 ## Available emotions
 
-Before choosing an emotion, query the doll endpoint to get the list of emotions supported by the currently active skin (replace `{port}` with the discovered port):
+Before choosing an emotion, query the doll endpoint to get the list of emotions supported by the currently active skin (replace `{host}` and `{port}` with the discovered values):
 
 ```
-GET http://127.0.0.1:{port}/emotions
+GET http://{host}:{port}/emotions
 ```
 
 This returns a JSON array of objects, each with `name` and `description`:
@@ -41,7 +38,7 @@ Use the `description` to understand the intended use of each emotion, especially
 
 ## Endpoint
 
-`POST http://127.0.0.1:{port}/status`
+`POST http://{host}:{port}/status`
 
 ## Payload
 
@@ -70,7 +67,7 @@ Use the `description` to understand the intended use of each emotion, especially
 ## Example
 
 ```bash
-# Assuming default port 3000
+# Assuming defaults (host=127.0.0.1, port=3000)
 curl -X POST http://127.0.0.1:3000/status \
   -H "Content-Type: application/json" \
   -d '{"status":"responding","emotion":"happy","text":"ファイルの修正が完了しました！"}'

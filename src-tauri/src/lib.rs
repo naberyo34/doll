@@ -5,7 +5,7 @@ mod server;
 mod skin;
 mod voisona;
 
-use commands::ServerPort;
+use commands::OpenClawRemote;
 use skin::SkinInfo;
 use std::sync::Arc;
 use tauri::Manager;
@@ -16,9 +16,20 @@ use voisona::VoisonaClient;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_config = config::load_config();
+    let remote_mode = app_config.openclaw.is_remote();
     let skin_name = app_config.skin;
     let port = app_config.port;
-    let openclaw_agent = Arc::new(app_config.openclaw_agent);
+    let openclaw_agent = Arc::new(app_config.openclaw.agent);
+    let openclaw_remote = OpenClawRemote {
+        url: app_config.openclaw.url,
+        token: app_config.openclaw.token,
+    };
+
+    if remote_mode {
+        log::info!("Remote mode: Gateway URL = {}", openclaw_remote.url);
+    } else {
+        log::info!("Local mode: using openclaw CLI");
+    }
 
     let tts = if app_config.voisona.enabled {
         log::info!("VoiSona TTS enabled (port {})", app_config.voisona.port);
@@ -52,8 +63,20 @@ pub fn run() {
             commands::get_skin_image,
             commands::send_message,
         ])
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .on_menu_event(move |app, event| match event.id().as_ref() {
             "install_openclaw" => {
+                if remote_mode {
+                    app.dialog()
+                        .message(
+                            "リモートモードでは、OpenClaw が動作しているサーバー側で\
+                             手動インストールしてください。\n\n\
+                             詳しくは README の「OpenClaw との接続」を参照してください。",
+                        )
+                        .title("doll")
+                        .blocking_show();
+                    return;
+                }
+
                 let resource_dir = app
                     .path()
                     .resource_dir()
@@ -120,10 +143,11 @@ pub fn run() {
             app.manage(Arc::clone(&skin_info));
             app.manage(Arc::clone(&setup_skins_dir));
             app.manage(Arc::clone(&openclaw_agent));
-            app.manage(ServerPort(port));
+            app.manage(openclaw_remote);
 
             let state = server::AppState::new(app.handle().clone(), tts, skin_info, emotions_json);
-            tauri::async_runtime::spawn(server::http_server(state, port));
+            app.manage(state.clone());
+            tauri::async_runtime::spawn(server::http_server(state, port, remote_mode));
             Ok(())
         })
         .run(tauri::generate_context!())

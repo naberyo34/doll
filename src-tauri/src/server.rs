@@ -11,7 +11,7 @@ use crate::voisona::VoisonaClient;
 
 /// Status payload sent by the OpenClaw agent and forwarded to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenClawStatus {
+pub(crate) struct OpenClawStatus {
     status: AgentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     emotion: Option<String>,
@@ -19,10 +19,22 @@ struct OpenClawStatus {
     text: Option<String>,
 }
 
+impl OpenClawStatus {
+    /// Creates a "thinking" status payload used when the agent starts
+    /// processing a message.
+    pub(crate) fn thinking() -> Self {
+        Self {
+            status: AgentStatus::Responding,
+            emotion: Some("thinking".to_string()),
+            text: None,
+        }
+    }
+}
+
 /// The lifecycle state reported by the OpenClaw agent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-enum AgentStatus {
+pub(crate) enum AgentStatus {
     Idle,
     Responding,
     /// Catch-all for unknown values so unrecognised strings don't fail
@@ -63,55 +75,61 @@ impl AppState {
             thinking_task: Arc::new(Mutex::new(None)),
         }
     }
+
+    /// Processes an incoming status payload: emits a Tauri event to the
+    /// frontend, manages the thinking-phrase loop, and triggers TTS.
+    ///
+    /// This is the shared core used by both the HTTP handler and direct
+    /// callers (e.g. `send_message` for the thinking state).
+    pub(crate) async fn process_status(&self, payload: &OpenClawStatus) -> Result<(), String> {
+        self.app
+            .emit("openclaw-status", payload)
+            .map_err(|e| format!("Failed to emit status event: {e}"))?;
+
+        let is_thinking = payload.emotion.as_deref() == Some("thinking")
+            && payload.text.as_deref().is_none_or(|t| t.is_empty());
+
+        if !is_thinking {
+            let mut guard = self.thinking_task.lock().await;
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+
+        if is_thinking {
+            let mut guard = self.thinking_task.lock().await;
+            if guard.is_none() {
+                let s = self.clone();
+                let handle = tauri::async_runtime::spawn(thinking_phrase_loop(s));
+                *guard = Some(handle);
+            }
+        } else {
+            spawn_tts_for_payload(self, payload);
+        }
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// Handles `POST /status` — parses the JSON body, emits a Tauri event so the
-/// React frontend can update the mascot expression, and optionally triggers
-/// VoiSona Talk TTS when `text` is present.
-///
-/// When `emotion` is `"thinking"` and no explicit `text` is given, a
-/// background loop is started that speaks a random thinking phrase every
-/// [`THINKING_PHRASE_INTERVAL`]. The loop is cancelled as soon as any
-/// non-thinking status arrives.
+/// Handles `POST /status` — delegates to [`AppState::process_status`] for
+/// event emission, thinking-phrase management, and TTS.
 async fn handle_status(
     State(state): State<AppState>,
     Json(payload): Json<OpenClawStatus>,
 ) -> StatusCode {
     log::info!("Received status: {:?}", payload);
 
-    if let Err(e) = state.app.emit("openclaw-status", &payload) {
-        log::warn!("Failed to emit status event: {e}");
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
-
-    let is_thinking = payload.emotion.as_deref() == Some("thinking")
-        && payload.text.as_deref().is_none_or(|t| t.is_empty());
-
-    // Cancel any running thinking loop when a non-thinking status arrives.
-    if !is_thinking {
-        let mut guard = state.thinking_task.lock().await;
-        if let Some(handle) = guard.take() {
-            handle.abort();
+    match state.process_status(&payload).await {
+        Ok(()) => StatusCode::OK,
+        Err(e) => {
+            log::warn!("{e}");
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     }
-
-    if is_thinking {
-        // Only start a new loop if one isn't already running.
-        let mut guard = state.thinking_task.lock().await;
-        if guard.is_none() {
-            let s = state.clone();
-            let handle = tauri::async_runtime::spawn(thinking_phrase_loop(s));
-            *guard = Some(handle);
-        }
-    } else {
-        spawn_tts_for_payload(&state, &payload);
-    }
-
-    StatusCode::OK
 }
 
 /// Handles `GET /emotions` — returns the pre-serialised JSON list of available
@@ -191,14 +209,19 @@ fn spawn_tts_for_payload(state: &AppState, payload: &OpenClawStatus) {
 // Server entry-point
 // ---------------------------------------------------------------------------
 
-/// Starts the local HTTP server that OpenClaw pushes status updates to.
-pub(crate) async fn http_server(state: AppState, port: u16) {
+/// Starts the HTTP server that OpenClaw pushes status updates to.
+///
+/// In local mode the server binds to `127.0.0.1` (loopback only).
+/// In remote mode it binds to `0.0.0.0` so that the OpenClaw server on
+/// another machine can reach it over the LAN.
+pub(crate) async fn http_server(state: AppState, port: u16, remote_mode: bool) {
     let router = Router::new()
         .route("/status", routing::post(handle_status))
         .route("/emotions", routing::get(handle_emotions))
         .with_state(state);
 
-    let addr = format!("127.0.0.1:{port}");
+    let host = if remote_mode { "0.0.0.0" } else { "127.0.0.1" };
+    let addr = format!("{host}:{port}");
     log::info!("doll HTTP server listening on {addr}");
 
     match TcpListener::bind(&addr).await {

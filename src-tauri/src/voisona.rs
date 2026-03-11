@@ -123,7 +123,7 @@ impl VoisonaClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| format!("HTTP client error: {e}"))?;
-        let base = format!("http://localhost:{}/api/talk/v1/", config.port);
+        let base = format!("http://{}:{}/api/talk/v1/", config.host, config.port);
         Ok(Self {
             client,
             config,

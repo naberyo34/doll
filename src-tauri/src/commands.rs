@@ -4,13 +4,17 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::{AppHandle, Manager};
 
 use crate::config;
+use crate::server::{AppState, OpenClawStatus};
 use crate::skin::{self, SkinInfo};
 
-/// The port the local HTTP server is listening on.
+/// Remote OpenClaw Gateway connection info.
 ///
-/// Wrapped in a newtype so it can be registered as Tauri managed state
-/// without conflicting with other `u16` values.
-pub(crate) struct ServerPort(pub(crate) u16);
+/// When `url` is empty, doll runs in local mode (launch `openclaw` CLI).
+/// When set, doll uses the Gateway `/v1/responses` HTTP API.
+pub(crate) struct OpenClawRemote {
+    pub(crate) url: String,
+    pub(crate) token: String,
+}
 
 /// Returns cached information about the currently active skin.
 #[tauri::command]
@@ -56,27 +60,41 @@ pub async fn show_context_menu(window: tauri::WebviewWindow) -> Result<(), Strin
     window.popup_menu(&menu).map_err(|e| e.to_string())
 }
 
-/// Sends a user message to the OpenClaw agent by spawning `openclaw agent`.
-/// Triggers thinking expression + TTS by posting to our own HTTP endpoint
-/// before the call, then lets the agent's Skill response (via HTTP
-/// `POST /status`) update the emotion.
+/// Sends a user message to the OpenClaw agent.
+///
+/// In **local mode** (no Gateway URL configured), spawns `openclaw agent`
+/// via the CLI.  In **remote mode**, calls the Gateway `/v1/responses`
+/// endpoint over HTTP.
+///
+/// Thinking expression + TTS are triggered directly through [`AppState`]
+/// before the agent call.
 #[tauri::command]
 pub async fn send_message(
     text: String,
     agent_name: tauri::State<'_, Arc<String>>,
-    server_port: tauri::State<'_, ServerPort>,
+    remote: tauri::State<'_, OpenClawRemote>,
+    app_state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let url = format!("http://127.0.0.1:{}/status", server_port.0);
-    let _ = reqwest::Client::new()
-        .post(&url)
-        .json(&serde_json::json!({"status": "responding", "emotion": "thinking"}))
-        .send()
-        .await;
+    if let Err(e) = app_state.process_status(&OpenClawStatus::thinking()).await {
+        log::warn!("Failed to emit thinking status: {e}");
+    }
 
+    if remote.url.is_empty() {
+        send_message_local(&text, &agent_name).await?;
+    } else {
+        send_message_gateway(&text, &remote.url, &remote.token, &agent_name).await?;
+    }
+
+    log::info!("Sent message to OpenClaw: {text}");
+    Ok(())
+}
+
+/// Sends a message by spawning the local `openclaw` CLI.
+async fn send_message_local(text: &str, agent_name: &str) -> Result<(), String> {
     let mut cmd = tokio::process::Command::new("openclaw");
-    cmd.args(["agent", "--message", &text]);
+    cmd.args(["agent", "--message", text]);
     if !agent_name.is_empty() {
-        cmd.args(["--agent", &agent_name]);
+        cmd.args(["--agent", agent_name]);
     }
 
     let output = cmd
@@ -89,8 +107,48 @@ pub async fn send_message(
         log::warn!("openclaw agent failed: {stderr}");
         return Err(format!("openclaw agent failed: {stderr}"));
     }
+    Ok(())
+}
 
-    log::info!("Sent message to OpenClaw: {text}");
+/// Sends a message to the OpenClaw Gateway via `POST /v1/responses`.
+async fn send_message_gateway(
+    text: &str,
+    base_url: &str,
+    token: &str,
+    agent: &str,
+) -> Result<(), String> {
+    let url = format!("{}/v1/responses", base_url.trim_end_matches('/'));
+
+    let mut req = reqwest::Client::new()
+        .post(&url)
+        .header("content-type", "application/json");
+
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    if !agent.is_empty() {
+        req = req.header("x-openclaw-agent-id", agent);
+    }
+
+    let body = serde_json::json!({
+        "input": text,
+    });
+
+    let resp = req
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Gateway request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "(no body)".to_string());
+        return Err(format!("Gateway returned {status}: {body}"));
+    }
+
     Ok(())
 }
 
