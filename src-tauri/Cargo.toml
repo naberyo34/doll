@@ -25,3 +25,4 @@ toml = "0.8"
 dirs = "6"
 rand = "0.9"
 tauri-plugin-dialog = "2.6.0"
+fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
