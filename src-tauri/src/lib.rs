@@ -120,6 +120,7 @@ pub fn run() {
                         display_name: setup_skin_name.clone(),
                         emotions: Vec::new(),
                         voice: None,
+                        base_voice_params: Default::default(),
                         thinking_phrases: Vec::new(),
                     }
                 });

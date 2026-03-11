@@ -2,6 +2,74 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+// ---------------------------------------------------------------------------
+// VoiceParams — maps to VoiSona Talk `global_parameters`
+// ---------------------------------------------------------------------------
+
+/// Voice parameters that map directly to VoiSona Talk API
+/// `global_parameters`.
+///
+/// All fields are optional; omitted values inherit from the skin's base
+/// voice settings, and ultimately fall back to VoiSona Talk defaults when
+/// sent in a synthesis request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VoiceParams {
+    /// Speech rate (default: 1, range: 0.2–5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
+    /// Amplitude in decibels (default: 0, range: −8–8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f64>,
+    /// Pitch shift in cents (default: 0, range: −600–600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitch: Option<f64>,
+    /// Pitch contour variation scale (default: 1, range: 0–2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intonation: Option<f64>,
+    /// Age-like voice quality parameter (default: 0, range: −1–1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alp: Option<f64>,
+    /// Huskiness control (default: 0, range: −20–20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub huskiness: Option<f64>,
+    /// Style weight coefficients array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_weights: Option<Vec<f64>>,
+}
+
+impl VoiceParams {
+    /// Merges `self` (base) with `overlay`, preferring overlay values.
+    pub fn merge(&self, overlay: &VoiceParams) -> VoiceParams {
+        VoiceParams {
+            speed: overlay.speed.or(self.speed),
+            volume: overlay.volume.or(self.volume),
+            pitch: overlay.pitch.or(self.pitch),
+            intonation: overlay.intonation.or(self.intonation),
+            alp: overlay.alp.or(self.alp),
+            huskiness: overlay.huskiness.or(self.huskiness),
+            style_weights: overlay
+                .style_weights
+                .clone()
+                .or_else(|| self.style_weights.clone()),
+        }
+    }
+
+    /// Returns `true` when every field is `None`.
+    pub fn is_empty(&self) -> bool {
+        self.speed.is_none()
+            && self.volume.is_none()
+            && self.pitch.is_none()
+            && self.intonation.is_none()
+            && self.alp.is_none()
+            && self.huskiness.is_none()
+            && self.style_weights.is_none()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// skin.toml internal types
+// ---------------------------------------------------------------------------
+
 /// Metadata loaded from an optional `skin.toml` inside a skin directory.
 #[derive(Debug, Deserialize, Default)]
 struct SkinMeta {
@@ -10,7 +78,7 @@ struct SkinMeta {
     /// Per-skin voice library override for VoiSona Talk TTS.
     #[serde(default)]
     voice: Option<VoiceOverride>,
-    /// Maps emotion name → config (description + optional style weights).
+    /// Maps emotion name → config (description + optional voice params).
     /// Accepts both a plain string (`happy = "desc"`) and a detailed table
     /// (`[emotions.happy] description = "desc" style_weights = [...]`).
     #[serde(default)]
@@ -27,11 +95,11 @@ struct SkinMeta {
 enum EmotionValue {
     /// Short form: `happy = "嬉しい・ポジティブな応答"`
     Simple(String),
-    /// Full form with optional VoiSona style weights.
+    /// Full form with optional VoiSona voice parameters.
     Detailed {
         description: String,
-        #[serde(default)]
-        style_weights: Option<Vec<f64>>,
+        #[serde(flatten)]
+        params: VoiceParams,
     },
 }
 
@@ -43,18 +111,23 @@ impl EmotionValue {
         }
     }
 
-    fn style_weights(&self) -> Option<&Vec<f64>> {
+    fn voice_params(&self) -> VoiceParams {
         match self {
-            EmotionValue::Simple(_) => None,
-            EmotionValue::Detailed { style_weights, .. } => style_weights.as_ref(),
+            EmotionValue::Simple(_) => VoiceParams::default(),
+            EmotionValue::Detailed { params, .. } => params.clone(),
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
 /// Per-skin voice library selection, defined in `skin.toml` under `[voice]`.
 ///
 /// When present, overrides the global `[voisona]` voice settings in
-/// `config.toml` for this skin.
+/// `config.toml` for this skin.  The flattened [`VoiceParams`] fields act
+/// as the skin-wide base voice parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceOverride {
     /// VoiSona Talk voice library name (e.g. `"nurse-robot-type-t_ja_JP"`).
@@ -63,9 +136,12 @@ pub struct VoiceOverride {
     /// VoiSona Talk API.
     #[serde(default)]
     pub voice_version: Option<String>,
+    /// Base voice parameters for this skin.
+    #[serde(flatten)]
+    pub params: VoiceParams,
 }
 
-/// A single emotion entry with its name, description, and optional TTS style.
+/// A single emotion entry with its name, description, and merged TTS params.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmotionEntry {
     /// Emotion key (matches the PNG filename without extension).
@@ -73,10 +149,9 @@ pub struct EmotionEntry {
     /// Human-readable description of when to use this emotion.
     /// Falls back to the emotion name when not specified in `skin.toml`.
     pub description: String,
-    /// VoiSona Talk style weights for this emotion. Sent as
-    /// `global_parameters.style_weights` in the synthesis request.
+    /// Merged voice parameters (skin base + emotion overlay).
     #[serde(skip_serializing)]
-    pub style_weights: Option<Vec<f64>>,
+    pub voice_params: VoiceParams,
 }
 
 /// Information about a discovered skin, sent to the frontend and HTTP clients.
@@ -91,6 +166,9 @@ pub struct SkinInfo {
     /// Per-skin voice library override for TTS.
     #[serde(skip_serializing)]
     pub voice: Option<VoiceOverride>,
+    /// Skin-wide base voice parameters (used for thinking and fallback).
+    #[serde(skip_serializing)]
+    pub base_voice_params: VoiceParams,
     /// Phrases spoken via TTS when the agent enters the "thinking" state.
     #[serde(skip_serializing)]
     pub thinking_phrases: Vec<String>,
@@ -125,6 +203,12 @@ pub fn discover_skin(skins_dir: &Path, name: &str) -> Option<SkinInfo> {
 
     let display_name = meta.display_name.unwrap_or_else(|| name.to_string());
 
+    let base_params = meta
+        .voice
+        .as_ref()
+        .map(|v| v.params.clone())
+        .unwrap_or_default();
+
     let mut emotions = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -132,16 +216,17 @@ pub fn discover_skin(skins_dir: &Path, name: &str) -> Option<SkinInfo> {
             if path.extension().and_then(|e| e.to_str()) == Some("png") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     if stem != "idle" {
-                        let (description, style_weights) =
-                            if let Some(val) = meta.emotions.get(stem) {
-                                (val.description().to_string(), val.style_weights().cloned())
-                            } else {
-                                (stem.to_string(), None)
-                            };
+                        let (description, voice_params) = if let Some(val) = meta.emotions.get(stem)
+                        {
+                            let merged = base_params.merge(&val.voice_params());
+                            (val.description().to_string(), merged)
+                        } else {
+                            (stem.to_string(), base_params.clone())
+                        };
                         emotions.push(EmotionEntry {
                             name: stem.to_string(),
                             description,
-                            style_weights,
+                            voice_params,
                         });
                     }
                 }
@@ -155,6 +240,7 @@ pub fn discover_skin(skins_dir: &Path, name: &str) -> Option<SkinInfo> {
         display_name,
         emotions,
         voice: meta.voice,
+        base_voice_params: base_params,
         thinking_phrases: meta.thinking_phrases,
     })
 }

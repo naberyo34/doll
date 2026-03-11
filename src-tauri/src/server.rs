@@ -170,15 +170,20 @@ fn speak_random_thinking_phrase(state: &AppState) {
     };
     let tts = Arc::clone(tts);
     let voice = state.skin_info.voice.clone();
-    let style_weights = state
+    let voice_params = state
         .skin_info
         .emotions
         .iter()
         .find(|e| e.name == "thinking")
-        .and_then(|e| e.style_weights.clone());
+        .map(|e| e.voice_params.clone())
+        .unwrap_or_else(|| state.skin_info.base_voice_params.clone());
     tauri::async_runtime::spawn(async move {
-        tts.synthesize(&text, voice.as_ref(), style_weights.as_deref())
-            .await;
+        let params = if voice_params.is_empty() {
+            None
+        } else {
+            Some(&voice_params)
+        };
+        tts.synthesize(&text, voice.as_ref(), params).await;
     });
 }
 
@@ -191,17 +196,25 @@ fn spawn_tts_for_payload(state: &AppState, payload: &OpenClawStatus) {
     let Some(ref tts) = state.tts else { return };
     let tts = Arc::clone(tts);
     let voice = state.skin_info.voice.clone();
-    let style_weights = payload.emotion.as_ref().and_then(|emo| {
-        state
-            .skin_info
-            .emotions
-            .iter()
-            .find(|e| e.name == *emo)
-            .and_then(|e| e.style_weights.clone())
-    });
+    let voice_params = payload
+        .emotion
+        .as_ref()
+        .and_then(|emo| {
+            state
+                .skin_info
+                .emotions
+                .iter()
+                .find(|e| e.name == *emo)
+                .map(|e| e.voice_params.clone())
+        })
+        .unwrap_or_else(|| state.skin_info.base_voice_params.clone());
     tauri::async_runtime::spawn(async move {
-        tts.synthesize(&text, voice.as_ref(), style_weights.as_deref())
-            .await;
+        let params = if voice_params.is_empty() {
+            None
+        } else {
+            Some(&voice_params)
+        };
+        tts.synthesize(&text, voice.as_ref(), params).await;
     });
 }
 

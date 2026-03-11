@@ -1,5 +1,5 @@
 use crate::config::VoisonaConfig;
-use crate::skin::VoiceOverride;
+use crate::skin::{VoiceOverride, VoiceParams};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -75,10 +75,39 @@ struct SynthesisRequest {
     global_parameters: Option<GlobalParameters>,
 }
 
-/// Voice style parameters sent alongside a synthesis request.
+/// Voice parameters sent as `global_parameters` in a synthesis request.
+///
+/// Field names match the VoiSona Talk API (v0.9.0) exactly.
 #[derive(Debug, Serialize)]
 struct GlobalParameters {
-    style_weights: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speed: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    volume: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pitch: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    intonation: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alp: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    huskiness: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    style_weights: Option<Vec<f64>>,
+}
+
+impl From<&VoiceParams> for GlobalParameters {
+    fn from(p: &VoiceParams) -> Self {
+        Self {
+            speed: p.speed,
+            volume: p.volume,
+            pitch: p.pitch,
+            intonation: p.intonation,
+            alp: p.alp,
+            huskiness: p.huskiness,
+            style_weights: p.style_weights.clone(),
+        }
+    }
 }
 
 /// Response from a synthesis POST.
@@ -98,7 +127,7 @@ struct ResolvedVoice {
     name: String,
     version: String,
     language: String,
-    style_weights: Option<Vec<f64>>,
+    voice_params: Option<VoiceParams>,
 }
 
 // ---------------------------------------------------------------------------
@@ -135,16 +164,17 @@ impl VoisonaClient {
     /// Synthesises `text` and plays it through the default audio device.
     /// Errors are logged rather than propagated.
     ///
-    /// `voice_override` takes precedence over the global voice settings.
-    /// `style_weights`, when provided, controls the voice's emotional tone.
+    /// `voice_override` selects the voice library (skin > config > auto).
+    /// `voice_params`, when provided, controls speech rate, pitch, style,
+    /// and other VoiSona Talk `global_parameters`.
     pub async fn synthesize(
         &self,
         text: &str,
         voice_override: Option<&VoiceOverride>,
-        style_weights: Option<&[f64]>,
+        voice_params: Option<&VoiceParams>,
     ) {
         if let Err(e) = self
-            .synthesize_inner(text, voice_override, style_weights)
+            .synthesize_inner(text, voice_override, voice_params)
             .await
         {
             log::warn!("VoiSona TTS failed: {e}");
@@ -155,7 +185,7 @@ impl VoisonaClient {
         &self,
         text: &str,
         voice_override: Option<&VoiceOverride>,
-        style_weights: Option<&[f64]>,
+        voice_params: Option<&VoiceParams>,
     ) -> Result<(), VoisonaError> {
         let (name, version, language) = self
             .cached_voice
@@ -166,7 +196,7 @@ impl VoisonaClient {
             name: name.clone(),
             version: version.clone(),
             language: language.clone(),
-            style_weights: style_weights.map(|w| w.to_vec()),
+            voice_params: voice_params.cloned(),
         };
 
         let uuid = self.request_synthesis(text, &voice).await?;
@@ -263,9 +293,11 @@ impl VoisonaClient {
             voice_name: voice.name.clone(),
             voice_version: voice.version.clone(),
             force_enqueue: true,
-            global_parameters: voice.style_weights.as_ref().map(|w| GlobalParameters {
-                style_weights: w.clone(),
-            }),
+            global_parameters: voice
+                .voice_params
+                .as_ref()
+                .filter(|p| !p.is_empty())
+                .map(GlobalParameters::from),
         };
 
         let resp = self
